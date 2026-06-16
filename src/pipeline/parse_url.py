@@ -4,8 +4,8 @@
 # This is the entry point of the entire EVELYN pipeline.
 # Every URL we ever process passes through this function first.
 
-import tldextract  # This library knows about every TLD (.com, .xyz, .co.in, etc.)
-from urllib.parse import urlparse  # Built into Python — parses URL structure
+import tldextract
+from urllib.parse import urlparse
 
 
 def parse_url(url: str) -> dict:
@@ -14,77 +14,58 @@ def parse_url(url: str) -> dict:
 
     Example input:  "https://secure-bank-login.xyz/verify?id=123"
     Example output: {
-        "raw_url":   "https://secure-bank-login.xyz/verify?id=123",
-        "scheme":    "https",
-        "subdomain": "secure-bank-login",   <- wait, explained below
-        "domain":    "xyz",                 <- the registered domain
-        "suffix":    "xyz",                 <- the TLD
+        "raw_url":     "https://secure-bank-login.xyz/verify?id=123",
+        "scheme":      "https",
+        "subdomain":   "",
+        "domain":      "secure-bank-login",
+        "suffix":      "xyz",
         "full_domain": "secure-bank-login.xyz",
-        "path":      "/verify",
-        "query":     "id=123",
-        "is_ip":     False
+        "path":        "/verify",
+        "query":       "id=123",
+        "is_ip":       False
     }
     """
 
-    # urlparse splits the URL by its structural parts
-    # "https://secure-bank-login.xyz/verify?id=123"
-    #  scheme   netloc (host)         path   query
-    parsed = urlparse(url)
-
-    # tldextract is smarter than urlparse for domain splitting
-    # It knows that "secure-bank-login.xyz" has:
-    #   subdomain = "" (nothing before the domain)
-    #   domain    = "secure-bank-login"
-    #   suffix    = "xyz"
-    # And that "login.secure.bank.co.uk" has:
-    #   subdomain = "login.secure"
-    #   domain    = "bank"
-    #   suffix    = "co.uk"   <- tldextract knows this is ONE suffix
+    parsed    = urlparse(url)
     extracted = tldextract.extract(url)
 
-    # Check if the host is a raw IP address like "http://185.220.101.47/login"
-    # Phishing domains hosted on raw IPs with no domain name is a signal
-    # We detect this by checking: does urlparse give us a netloc that
-    # looks like numbers-and-dots only?
-    host = parsed.netloc  # e.g. "secure-bank-login.xyz" or "185.220.101.47"
+    # tldextract 5.x renamed registered_domain → top_domain_under_public_suffix
+    # We try the new name first; fall back to the old name for older installs.
+    # This way the code works regardless of which version someone has.
+    if hasattr(extracted, "top_domain_under_public_suffix"):
+        full_domain = extracted.top_domain_under_public_suffix
+    else:
+        full_domain = extracted.registered_domain   # pre-5.x
+
+    host  = parsed.netloc
     is_ip = _is_ip_address(host)
 
-    # Build and return the result as a dictionary
-    # A dictionary is the right structure here because each URL
-    # produces exactly one set of named parts — no ordering needed
     return {
         "raw_url":     url,
-        "scheme":      parsed.scheme,           # "http" or "https"
-        "subdomain":   extracted.subdomain,     # "" or "www" or "login.secure"
-        "domain":      extracted.domain,        # "secure-bank-login"
-        "suffix":      extracted.suffix,        # "xyz" or "co.uk"
-        "full_domain": extracted.registered_domain,  # "secure-bank-login.xyz"
-        "path":        parsed.path,             # "/verify"
-        "query":       parsed.query,            # "id=123"
+        "scheme":      parsed.scheme,
+        "subdomain":   extracted.subdomain,
+        "domain":      extracted.domain,
+        "suffix":      extracted.suffix,
+        "full_domain": full_domain,
+        "path":        parsed.path,
+        "query":       parsed.query,
         "is_ip":       is_ip,
     }
 
 
 def _is_ip_address(host: str) -> bool:
     """
-    Returns True if host looks like a raw IP address (e.g. "185.220.101.47").
-    The underscore prefix _ means: this is a helper, not meant to be
-    called from outside this file. It's only for parse_url() to use.
+    Returns True if host is a raw IPv4 address like "185.220.101.47".
+    Strips port number first if present: "185.220.101.47:8080" → "185.220.101.47"
     """
-
-    # Remove port number if present: "185.220.101.47:8080" → "185.220.101.47"
-    host = host.split(":")[0]
-
-    # Split by dots: ["185", "220", "101", "47"]
+    host  = host.split(":")[0]
     parts = host.split(".")
 
-    # An IPv4 address always has exactly 4 parts
     if len(parts) != 4:
         return False
 
-    # Every part must be a number between 0 and 255
     for part in parts:
-        if not part.isdigit():        # isdigit() → True if all characters are 0-9
+        if not part.isdigit():
             return False
         if not (0 <= int(part) <= 255):
             return False
@@ -92,35 +73,63 @@ def _is_ip_address(host: str) -> bool:
     return True
 
 
-# ─── SELF-TEST ────────────────────────────────────────────────────────────────
-# This block only runs when you execute THIS file directly:
-#   python src/pipeline/parse_url.py
-# It does NOT run when you import parse_url from another file.
-# This is the standard Python pattern for "run me to test me".
+def _print_result(result: dict) -> None:
+    """
+    Pretty-prints one parse result to the terminal.
+    Flags suspicious TLDs and raw IPs inline.
+    Extracted into its own function so both the user-URL path
+    and the test path can call it without duplicating code.
+    """
+    # TLDs that appear disproportionately in phishing campaigns.
+    # Source: APWG eCrime reports 2022-2024.
+    SUSPICIOUS_TLDS = {
+        "xyz", "cc", "tk", "ml", "ga", "cf", "gq",
+        "top", "pw", "work", "click", "link", "online"
+    }
 
+    ip_flag  = "  ⚠  RAW IP — no domain name"   if result["is_ip"] else ""
+    tld_flag = "  ⚠  SUSPICIOUS TLD"             if result["suffix"] in SUSPICIOUS_TLDS else ""
+
+    print(f"\n  URL:         {result['raw_url']}")
+    print(f"  scheme:      {result['scheme']}")
+    print(f"  subdomain:   '{result['subdomain']}'")
+    print(f"  domain:      '{result['domain']}'")
+    print(f"  suffix:      '{result['suffix']}'{tld_flag}")
+    print(f"  full_domain: {result['full_domain']}")
+    print(f"  path:        {result['path']}")
+    print(f"  query:       '{result['query']}'")
+    print(f"  is_ip:       {result['is_ip']}{ip_flag}")
+    print(f"  {'─'*52}")
+
+
+# ── SELF-TEST ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    import sys
 
-    # A list of test URLs — mix of phishing patterns and edge cases
-    test_urls = [
-        "https://secure-bank-login.xyz/verify?id=123",   # classic phishing
-        "http://185.220.101.47/login",                   # raw IP, no domain
-        "https://www.google.com/search?q=test",          # benign, subdomain
-        "http://paypal-secure.update.co.uk/account",     # multi-level TLD
-        "https://login.microsoftonline.com.phish.cc/",   # subdomain abuse
-    ]
+    # If user supplied a URL as a command-line argument, analyse ONLY that URL.
+    # This keeps the output clean and focused when running from the terminal.
+    # Usage: python src/pipeline/parse_url.py https://evil-phish.xyz/login
+    if len(sys.argv) > 1:
+        user_url = sys.argv[1]
+        print("\n" + "=" * 58)
+        print("  EVELYN — parse_url()")
+        print("=" * 58)
+        _print_result(parse_url(user_url))
 
-    print("=" * 60)
-    print("EVELYN — parse_url() self-test")
-    print("=" * 60)
+    # No argument supplied → run the built-in test suite so we can verify
+    # that the function handles all edge cases correctly.
+    else:
+        TEST_URLS = [
+            "https://secure-bank-login.xyz/verify?id=123",   # suspicious TLD
+            "http://185.220.101.47/login",                   # raw IP
+            "https://www.google.com/search?q=test",          # benign with subdomain
+            "http://paypal-secure.update.co.uk/account",     # multi-level TLD
+            "https://login.microsoftonline.com.phish.cc/",   # subdomain abuse
+        ]
 
-    for url in test_urls:
-        result = parse_url(url)
-        print(f"\nURL:        {result['raw_url']}")
-        print(f"  scheme:     {result['scheme']}")
-        print(f"  subdomain:  '{result['subdomain']}'")
-        print(f"  domain:     '{result['domain']}'")
-        print(f"  suffix:     '{result['suffix']}'")
-        print(f"  full_domain:{result['full_domain']}")
-        print(f"  path:       {result['path']}")
-        print(f"  query:      '{result['query']}'")
-        print(f"  is_ip:      {result['is_ip']}")
+        print("\n" + "=" * 58)
+        print("  EVELYN — parse_url() test suite")
+        print("=" * 58)
+
+        for url in TEST_URLS:
+            _print_result(parse_url(url))
