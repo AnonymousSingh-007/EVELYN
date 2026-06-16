@@ -1,0 +1,12 @@
+tldextract
+dnspython
+python-whois
+requests
+networkx
+numpy
+scipy
+scikit-learn
+umap-learn
+matplotlib
+pandas
+tqdm

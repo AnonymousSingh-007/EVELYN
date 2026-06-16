@@ -1,0 +1,23 @@
+# Data (never commit raw phishing data to public repo)
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+
+# VS Code
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Results (large files)
+results/figures/*.png
+results/metrics/*.csv
