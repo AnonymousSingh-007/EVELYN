@@ -106,20 +106,30 @@ def _failure(domain: str, error_msg: str) -> dict:
 
 
 def _print_result(result: dict) -> None:
-    """Pretty-print one resolve_dns() result to the terminal."""
+    """
+    Pretty-print one resolve_dns() result to the terminal.
+
+    NOTE ON TTL THRESHOLD:
+    A low TTL alone is NOT a phishing signal — major CDNs (Google,
+    Cloudflare, Akamai) use low TTLs (30-300s) for legitimate global
+    load-balancing. We lowered our "suspicious" threshold to <60s and
+    relabeled it clearly as "CDN-or-evasion" rather than implying guilt.
+    The real signal only emerges when LOW TTL is combined with other
+    features (new domain age, suspicious TLD, no CDN ASN) in build_graph.py.
+    This function just reports the raw fact — it does not judge intent.
+    """
     print(f"\n  Domain:    {result['domain']}")
     if result["resolved"]:
         print(f"  Status:    ✓ RESOLVED")
         print(f"  IP(s):     {', '.join(result['ips'])}")
         print(f"  TTL:       {result['ttl']}s", end="")
-        if result["ttl"] is not None and result["ttl"] < 300:
-            print("  ⚠ LOW TTL — common in fast-rotating phishing infra")
+        if result["ttl"] is not None and result["ttl"] < 60:
+            print("  ℹ very low TTL — could be CDN load-balancing OR evasive infra")
         else:
             print()
     else:
         print(f"  Status:    ✗ FAILED  ({result['error']})")
     print(f"  {'─'*52}")
-
 
 # ── SELF-TEST ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
