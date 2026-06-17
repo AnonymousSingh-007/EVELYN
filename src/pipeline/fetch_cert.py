@@ -13,106 +13,77 @@
 # get a real, auditable answer.
 
 import requests
-
+import time
 
 CRT_SH_URL = "https://crt.sh/"
 
 
-def fetch_cert(domain: str, timeout: float = 10.0) -> dict:
+def fetch_cert(domain: str, timeout: float = 10.0, max_retries: int = 2) -> dict:
     """
     Queries crt.sh for certificates issued to this domain.
-
-    Example output:
-    {
-        "domain":          "secure-bank-login.xyz",
-        "cert_count":      2,
-        "shared_domains":  ["other-phish-domain.xyz", "third-domain.cc"],
-        "issuer":          "Let's Encrypt",
-        "resolved":        True,
-        "error":           None
-    }
+    Retries on timeout/502 because crt.sh is a free public service that
+    frequently struggles under load — this is normal, not exceptional,
+    behavior for this particular data source.
     """
 
-    # GUARD CLAUSE — same pattern as fetch_whois.py and resolve_dns.py.
-    # This function must receive a bare domain, never a full URL.
     if "://" in domain or "/" in domain:
         return _failure(domain, "InvalidInput: pass a bare domain, not a full URL")
 
-    try:
-        # crt.sh supports a JSON output mode via ?output=json
-        # We query with a wildcard prefix "%25." which means "this domain
-        # OR any subdomain of it" in crt.sh's search syntax (%25 = URL-encoded %)
-        response = requests.get(
-            CRT_SH_URL,
-            params={"q": f"%.{domain}", "output": "json"},
-            timeout=timeout,
-            headers={"User-Agent": "EVELYN-research-tool/0.1"},
-        )
+    last_error = None
 
-        # crt.sh returns HTTP 200 even when there are zero results —
-        # it just returns an empty JSON list. We still check the status
-        # code in case the service itself is down or rate-limiting us.
-        response.raise_for_status()
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.get(
+                CRT_SH_URL,
+                params={"q": f"%.{domain}", "output": "json"},
+                timeout=timeout,
+                headers={"User-Agent": "EVELYN-research-tool/0.1"},
+            )
+            response.raise_for_status()
+            cert_entries = response.json()
 
-        # The response can sometimes be empty text even with status 200
-        # if crt.sh is having a bad day. json() will throw if so, and
-        # we catch that in the except block below.
-        cert_entries = response.json()
+            if not cert_entries:
+                return {
+                    "domain": domain, "cert_count": 0,
+                    "shared_domains": [], "issuer": None,
+                    "resolved": True, "error": None,
+                }
 
-        if not cert_entries:
+            all_names = set()
+            issuers = set()
+            for entry in cert_entries:
+                names_in_this_cert = entry.get("name_value", "").split("\n")
+                all_names.update(n.strip() for n in names_in_this_cert if n.strip())
+                issuers.add(entry.get("issuer_name", "unknown"))
+
+            shared_domains = sorted(
+                name for name in all_names
+                if not name.endswith(domain) and domain not in name
+            )
+
             return {
-                "domain":         domain,
-                "cert_count":     0,
-                "shared_domains": [],
-                "issuer":         None,
-                "resolved":       True,
-                "error":          None,
+                "domain": domain, "cert_count": len(cert_entries),
+                "shared_domains": shared_domains,
+                "issuer": list(issuers)[0] if issuers else None,
+                "resolved": True, "error": None,
             }
 
-        # Each entry in cert_entries is one certificate record. The
-        # "name_value" field contains ALL domain names that certificate
-        # covers — this can include Subject Alternative Names (SANs),
-        # which is EXACTLY where we find "other domains sharing this cert".
-        # name_value often contains multiple domains separated by newlines.
-        all_names = set()
-        issuers = set()
+        except requests.exceptions.Timeout:
+            last_error = "Timeout"
+        except requests.exceptions.RequestException as e:
+            last_error = f"RequestError: {e}"
+        except ValueError as e:
+            last_error = f"InvalidJSON: {e}"
+        except Exception as e:
+            last_error = f"UnknownError: {e}"
 
-        for entry in cert_entries:
-            names_in_this_cert = entry.get("name_value", "").split("\n")
-            all_names.update(n.strip() for n in names_in_this_cert if n.strip())
-            issuers.add(entry.get("issuer_name", "unknown"))
+        # If we have retries left, wait a moment before trying again.
+        # crt.sh failures are often transient — a 2-second pause and
+        # retry succeeds more often than you'd expect.
+        if attempt < max_retries:
+            time.sleep(2)
 
-        # Remove the domain itself and any of ITS OWN subdomains from the
-        # "shared domains" list — we only care about OTHER, unrelated
-        # domains that happen to share a cert (that's the suspicious signal)
-        shared_domains = sorted(
-            name for name in all_names
-            if not name.endswith(domain) and domain not in name
-        )
-
-        return {
-            "domain":         domain,
-            "cert_count":     len(cert_entries),
-            "shared_domains": shared_domains,
-            "issuer":         list(issuers)[0] if issuers else None,
-            "resolved":       True,
-            "error":          None,
-        }
-
-    except requests.exceptions.Timeout:
-        return _failure(domain, "Timeout")
-
-    except requests.exceptions.RequestException as e:
-        # Covers connection errors, DNS failures for crt.sh itself,
-        # HTTP error status codes raised by raise_for_status(), etc.
-        return _failure(domain, f"RequestError: {e}")
-
-    except ValueError as e:
-        # response.json() raises ValueError if the body isn't valid JSON
-        return _failure(domain, f"InvalidJSON: {e}")
-
-    except Exception as e:
-        return _failure(domain, f"UnknownError: {e}")
+    return _failure(domain, last_error)
 
 
 def _failure(domain: str, error_msg: str) -> dict:
@@ -158,8 +129,9 @@ if __name__ == "__main__":
 
     else:
         TEST_DOMAINS = [
-            "github.com",     # well-known domain, should show normal cert pattern
-            "google.com",     # massive cert footprint — good edge case to observe
+            "anthropic.com",   # moderate size, should return quickly
+            "example.com",     # IANA reserved domain, tiny cert footprint
+            "x.com"            # short domain, should return quickly
         ]
 
         print("\n" + "=" * 58)
