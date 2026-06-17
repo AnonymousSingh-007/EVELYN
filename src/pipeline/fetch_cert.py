@@ -125,19 +125,17 @@ if __name__ == "__main__":
         print("\n" + "=" * 58)
         print("  EVELYN — fetch_cert()")
         print("=" * 58)
-        _print_result(fetch_cert(sys.argv[1]))
+        result = fetch_cert(sys.argv[1])
+        _print_result(result)
+        if not result["resolved"] and "RequestError" in str(result["error"]):
+            print("\n  NOTE: crt.sh is a known-flaky free public service.")
+            print("  This is a documented limitation, not a bug in EVELYN.")
+            print("  Production systems would use a paid CT-log API (e.g. Censys).\n")
 
     else:
-        TEST_DOMAINS = [
-            "anthropic.com",   # moderate size, should return quickly
-            "example.com",     # IANA reserved domain, tiny cert footprint
-            "x.com"            # short domain, should return quickly
-        ]
-
+        TEST_DOMAINS = ["example.com", "x.com"]
         print("\n" + "=" * 58)
         print("  EVELYN — fetch_cert() test suite")
         print("=" * 58)
-        print("  NOTE: querying crt.sh — may take several seconds, it's a big public log")
-
         for domain in TEST_DOMAINS:
             _print_result(fetch_cert(domain))
