@@ -137,7 +137,7 @@ def _query_certspotter(domain: str, timeout: float) -> dict:
 
         all_names = set()
         for entry in issuances:
-            all_names.update(entry.get("dns_names", []))
+            all_names.update(_clean_domain_name(n) for n in entry.get("dns_names", []))
 
         shared = sorted(n for n in all_names if not n.endswith(domain) and domain not in n)
 
@@ -162,6 +162,15 @@ def _query_certspotter(domain: str, timeout: float) -> dict:
     except Exception as e:
         return _failure(domain, f"UnknownError: {e}")
 
+def _clean_domain_name(name: str) -> str:
+    """
+    CertSpotter occasionally returns markdown-style links instead of
+    plain domain strings in some fields. Strip that down to a clean
+    domain name so downstream graph code never has to deal with it.
+    """
+    if name.startswith("[") and "](" in name:
+        name = name.split("](")[0].lstrip("[")
+    return name
 
 def _failure(domain: str, error_msg: str) -> dict:
     return {
