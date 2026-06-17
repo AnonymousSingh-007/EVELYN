@@ -143,12 +143,14 @@ if __name__ == "__main__":
         _print_result(resolve_dns(sys.argv[1]))
 
     else:
-        # Built-in test domains: mix of real, benign, and intentionally-fake
+        # Built-in test domains: benign CDN-backed sites (to show low-TTL-is-normal),
+        # a dead domain (NXDOMAIN path), and a cheap-TLD domain (TLD signal, separate
+        # from TTL — this is what actually correlates with phishing in research data)
         TEST_DOMAINS = [
-            "google.com",                              # benign, should resolve fast
-            "github.com",                               # benign, should resolve fast
-            "this-domain-absolutely-does-not-exist-evelyn-test.com",  # NXDOMAIN test
-            "cloudflare.com",                           # benign, often low TTL (CDN)
+            "google.com",                                              # benign, CDN, low TTL — proves TTL alone is noise
+            "github.com",                                              # benign, CDN, low TTL
+            "this-domain-absolutely-does-not-exist-evelyn-test.com",   # NXDOMAIN path
+            "freenom.com",                                             # known free-domain provider, abused historically
         ]
 
         print("\n" + "=" * 58)
