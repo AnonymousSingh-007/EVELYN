@@ -9,267 +9,258 @@
 ╚══════╝  ╚═══╝  ╚══════╝╚══════╝╚═╝   ╚═╝  ╚═══╝
 ```
 
-### `Email Verification & Exploit Localization Yield Network`
+### **E**mail **V**erification & **E**xploit **L**ocalization **Y**ield **N**etwork
 
-[![Status](https://img.shields.io/badge/status-active_research-brightgreen?style=flat-square&logo=electron)]()
-[![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white)]()
-[![Stage](https://img.shields.io/badge/stage-1b_resolve__dns-orange?style=flat-square)]()
-[![Venue](https://img.shields.io/badge/target-IEEE_S%26P_%2F_USENIX-red?style=flat-square)]()
-[![License](https://img.shields.io/badge/license-private_research-lightgrey?style=flat-square)]()
-
-*Quantum graph-theoretic phishing infrastructure detection and campaign attribution.*
+*Quantum graph-theoretic phishing infrastructure detection.*  
+*They change their names. They can't change their shape.*
 
 ---
 
-**"They can change their names. They cannot change their shape."**
+![Status](https://img.shields.io/badge/STATUS-ACTIVE_RESEARCH-brightgreen?style=for-the-badge&logo=github)
+![Stage](https://img.shields.io/badge/STAGE-1b_DNS_RESOLUTION-blue?style=for-the-badge)
+![Python](https://img.shields.io/badge/PYTHON-3.14-yellow?style=for-the-badge&logo=python)
+![Venue Target](https://img.shields.io/badge/TARGET-IEEE_S%26P_%7C_USENIX-red?style=for-the-badge)
+![License](https://img.shields.io/badge/ACCESS-PRIVATE_RESEARCH-black?style=for-the-badge)
 
 </div>
 
 ---
 
-## ◈ What is EVELYN
+## ◈ THE PROBLEM
 
-Phishing campaigns are not random. Every attacker leaves behind a structural signature in the internet's fabric — a pattern of how their domains, IPs, certificates, registrars, and hosting providers connect to each other. They change domain names constantly. They cannot afford to rebuild their entire infrastructure.
+Attackers spin up hundreds of phishing domains a day.  
+Classical detectors look at the **name** — the string, the words, the TLD.  
+So attackers change the name. Constantly. Cheaply. $0.88 per domain.
 
-**EVELYN hunts the shape, not the name.**
+**EVELYN doesn't look at the name.**
 
-It models attacker infrastructure as a hypergraph and computes a **continuous-time quantum walk fingerprint** φ(G) — a permutation-invariant feature vector that encodes topology while remaining completely blind to node labels. Two phishing domains with completely different names, if they share infrastructure shape, will produce identical fingerprints. That is the attribution signal.
-
-```
-ATTACKER CHANGES:          ATTACKER CANNOT CHANGE:
-─────────────────          ───────────────────────
-✗ Domain name              ✓ How many IPs they use
-✗ URL path                 ✓ Which registrar they bulk-buy from  
-✗ Page content             ✓ Which ASN hosts their servers
-✗ TLS certificate          ✓ Whether they share certs across domains
-✗ Lure theme               ✓ The topology of their infrastructure
-```
+It looks at the **shape** — how 50 domains share 3 IPs, 1 registrar, and a single TLS certificate fingerprint. That shape is the attacker's true signature. Rebuilding it costs time, money, and exposure. They can't change it fast enough.
 
 ---
 
-## ◈ The Core Idea
+## ◈ THE WEAPON
+
+At the core of EVELYN is a **continuous-time quantum walk** on a phishing infrastructure hypergraph.
 
 ```
-G_i  =  infrastructure subgraph of phishing domain i
-         (nodes: domain, IP, registrar, TLS cert, ASN)
-         (edges: resolves-to, registered-by, shares-cert, hosted-in)
-
-H    =  −A                    ← Hamiltonian = negative adjacency matrix
-
-U(t) =  e^(−iHt)              ← quantum evolution operator
-
-φ(G) =  { |⟨j|U(t)|k⟩|² }   ← the fingerprint: topology encoded as
-                                  probability amplitudes after interference
+φ(G)  =  |⟨j| e^{−iHt} |k⟩|²   for all j,k ∈ V,  t ∈ {t₁,...,tₘ}
 ```
 
-> Same infrastructure shape → same φ(G) → same attacker.  
-> Every time. Provably.
+Where:
+- `H = −A` — the Hamiltonian (negative adjacency matrix of the infrastructure graph)
+- `e^{−iHt}` — wave evolution through the graph over time `t` (6 lines of Python)
+- `|⟨j|...|k⟩|²` — interference amplitude: the probability the wave travels from node `k` to node `j`
+- `φ(G)` — the topology fingerprint, **invariant to node labels, invariant to domain names**
+
+Two campaigns with identical infrastructure patterns produce **identical** `φ(G)`.  
+A zero-day domain from a known attacker **clusters with its campaign** before anyone has seen it.
 
 ---
 
-## ◈ Architecture
+## ◈ ARCHITECTURE
 
 ```
-                        ┌─────────────────────────────────────┐
-                        │           EVELYN PIPELINE            │
-                        └─────────────────────────────────────┘
+                    ┌──────────────────────────────────────────┐
+                    │             EVELYN PIPELINE               │
+                    └──────────────────────────────────────────┘
 
   RAW URL
     │
     ▼
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│ parse_url() │───▶│resolve_dns()│───▶│fetch_whois()│───▶│fetch_cert() │
-│             │    │             │    │             │    │             │
-│ domain      │    │ IP node     │    │ registrar   │    │ TLS cert    │
-│ TLD         │    │ A record    │    │ node        │    │ fingerprint │
-│ subdomain   │    │ MX record   │    │ org name    │    │ shared cert │
-│ is_ip flag  │    │ PTR record  │    │ created_dt  │    │ detection   │
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
-                                                                │
-                        ┌───────────────────────────────────────┘
-                        │
-                        ▼
-               ┌──────────────────┐
-               │  build_graph()   │  ←── assemble G_i as NetworkX hypergraph
-               └──────────────────┘
-                        │
-              ┌─────────┴──────────┐
-              │                    │
-              ▼                    ▼
-    ┌──────────────────┐  ┌──────────────────┐
-    │  hamiltonian()   │  │   (baselines)    │
-    │  H = −A          │  │   GraphSAGE      │
-    └──────────────────┘  │   Lexical RF     │
-              │            └──────────────────┘
-              ▼
-    ┌──────────────────┐
-    │     walk()       │  U(t) = expm(−iHt)
-    │  t ∈ {t₁…tₘ}    │  scipy.linalg.expm
-    └──────────────────┘
-              │
-              ▼
-    ┌──────────────────┐
-    │  fingerprint()   │  φ(G) = |⟨j|U(t)|k⟩|²  for all j,k,t
-    │  feature vector  │  permutation-invariant, fixed-dimension
-    └──────────────────┘
-              │
-              ▼
-    ┌──────────────────┐
-    │ dbscan_cluster() │  DBSCAN on φ(G) embeddings
-    │   + evaluate()   │  ARI / NMI / silhouette
-    └──────────────────┘
-              │
-              ▼
-    ┌──────────────────┐
-    │    UMAP plot     │  campaign clusters → paper figure
-    │  campaign attr.  │  known / novel / benign
-    └──────────────────┘
+┌────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+│ parse_url()│──►│resolve_dns()│──►│fetch_whois()│──►│ fetch_cert()│
+│            │   │             │   │             │   │             │
+│ domain     │   │ IP node     │   │ registrar   │   │ TLS cert    │
+│ TLD        │   │ A record    │   │ node        │   │ fingerprint │
+│ subdomain  │   │ TTL         │   │ WHOIS data  │   │ crt.sh      │
+└────────────┘   └─────────────┘   └─────────────┘   └──────┬──────┘
+                                                              │
+                                                              ▼
+                                                     ┌─────────────┐
+                                                     │build_graph()│
+                                                     │  NetworkX   │
+                                                     │  G_i ego-   │
+                                                     │  graph      │
+                                                     └──────┬──────┘
+                                                            │
+                      ┌─────────────────────────────────────┘
+                      │
+                      ▼
+           ┌─────────────────────┐
+           │   hamiltonian()     │
+           │   H = −A            │
+           └──────────┬──────────┘
+                      │
+                      ▼
+           ┌─────────────────────┐
+           │      walk()         │
+           │  U(t) = expm(−iHt) │
+           └──────────┬──────────┘
+                      │
+                      ▼
+           ┌─────────────────────┐
+           │   fingerprint()     │  ◄── permutation-invariant
+           │   φ(G) vector       │      topology fingerprint
+           └──────────┬──────────┘
+                      │
+                      ▼
+           ┌─────────────────────┐
+           │  dbscan_cluster()   │
+           │  campaign clusters  │
+           └──────────┬──────────┘
+                      │
+                      ▼
+           ┌─────────────────────┐
+           │    ATTRIBUTION      │
+           │  ✓ Known campaign   │
+           │  ⚠ Novel campaign   │
+           │  ○ Benign           │
+           └─────────────────────┘
 ```
 
 ---
 
-## ◈ Repository Layout
+## ◈ WHY QUANTUM WALKS BEAT GNNs
+
+| Property | GraphSAGE / GAT | EVELYN φ(G) |
+|---|---|---|
+| Captures global structure | ✗ 1–2 hop only | ✓ Full spectral encoding |
+| Permutation invariant | ✗ Training artifact | ✓ Provably, by construction |
+| Zero-shot on new topologies | ✗ Needs labeled examples | ✓ Unsupervised fingerprint |
+| Fixed-dim output for variable graphs | ✗ | ✓ |
+| Detects isomorphic campaigns | ✗ | ✓ |
+| Cost | O(n·d) per layer | O(n³) bounded by ego-graph |
+
+**One-sentence reviewer answer:**
+> *"For campaign attribution where node labels change but topology is stable, quantum walk fingerprints are provably superior because they are topology-invariant by construction, not by training."*
+
+---
+
+## ◈ REPOSITORY
 
 ```
 EVELYN/
 │
-├── src/                         ← all production source code
-│   ├── pipeline/                ← data collection (Stage 1)
-│   │   ├── parse_url.py         ✅ URL → domain/TLD/IP-flag
-│   │   ├── resolve_dns.py       🔄 domain → IP node (in progress)
-│   │   ├── fetch_whois.py       ⏳ domain → registrar node
-│   │   ├── fetch_cert.py        ⏳ domain → TLS cert node
-│   │   └── build_graph.py       ⏳ all above → NetworkX G_i
+├── src/
+│   ├── pipeline/
+│   │   ├── parse_url.py        ✅  URL → domain / TLD / subdomain / IP flag
+│   │   ├── resolve_dns.py      🔄  domain → IP node (A record + TTL)
+│   │   ├── fetch_whois.py      ⏳  domain → registrar node
+│   │   ├── fetch_cert.py       ⏳  domain → TLS cert fingerprint node
+│   │   └── build_graph.py      ⏳  all nodes → NetworkX graph G_i
 │   │
-│   ├── quantum/                 ← the core method (Stage 2–3)
-│   │   ├── hamiltonian.py       ⏳ H = −A
-│   │   ├── walk.py              ⏳ U(t) = expm(−iHt)
-│   │   └── fingerprint.py       ⏳ φ(G) feature extraction
+│   ├── quantum/
+│   │   ├── hamiltonian.py      ⏳  G_i → H = −A
+│   │   ├── walk.py             ⏳  H → U(t) = expm(−iHt)
+│   │   └── fingerprint.py      ⏳  U(t) → φ(G) feature vector
 │   │
-│   └── clustering/              ← attribution engine (Stage 4–5)
-│       ├── dbscan_cluster.py    ⏳ DBSCAN campaign clustering
-│       └── evaluate.py          ⏳ ARI, NMI, silhouette, UMAP
+│   └── clustering/
+│       ├── dbscan_cluster.py   ⏳  φ(G) vectors → campaign clusters
+│       └── evaluate.py         ⏳  ARI / NMI / F1 + UMAP visualisation
 │
-├── data/                        ← [gitignored — never commit phishing data]
-│   ├── raw/                     PhishTank CSVs, raw DNS outputs
-│   ├── processed/               Cleaned labelled URL lists
-│   └── graphs/                  Serialised NetworkX graphs per domain
+├── data/
+│   ├── raw/            ← PhishTank CSVs, raw DNS output      [gitignored]
+│   ├── processed/      ← Cleaned labelled URL dataset        [gitignored]
+│   └── graphs/         ← Serialised NetworkX graph objects   [gitignored]
 │
-├── notebooks/                   ← Jupyter exploration (not production)
-├── experiments/                 ← saved run configs and result logs
+├── notebooks/          ← Jupyter exploration (not production)
+├── experiments/        ← Saved run configs, hyperparameter logs
 ├── results/
-│   ├── figures/                 UMAP plots → paper figures
-│   └── metrics/                 ARI / NMI / F1 CSVs per experiment
-│
-├── docs/                        ← running methods notes → Section 3 of paper
-├── tests/                       ← unit tests for every src/ function
+│   ├── figures/        ← UMAP plots, paper figures
+│   └── metrics/        ← ARI / NMI / F1 CSVs per experiment
+├── docs/               ← Running methods notes → Section 3 of paper
+├── tests/              ← Unit tests for every src/ function
 ├── requirements.txt
-└── .gitignore
+└── README.md
 ```
 
 ---
 
-## ◈ Setup
+## ◈ SETUP
 
 ```bash
-# 1. Clone
+# Clone
 git clone https://github.com/YOUR_USERNAME/EVELYN.git
 cd EVELYN
 
-# 2. Create isolated environment
+# Environment
 python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # macOS / Linux
 
-# 3. Install all dependencies
+# Dependencies
 pip install -r requirements.txt
 ```
 
 ---
 
-## ◈ Usage
-
-Every module is self-testing. Run any file directly to verify it works.
+## ◈ USAGE
 
 ```bash
-# ── Stage 1a: URL parsing ─────────────────────────────────────
-# Analyse a single URL (your input only, no test clutter)
+# Analyse a single URL
 python src/pipeline/parse_url.py https://hdfc-secure-login.xyz/verify
 
-# Run the built-in test suite
+# Run the built-in test suite for any module
 python src/pipeline/parse_url.py
+python src/pipeline/resolve_dns.py
 
-# ── Stage 1b: DNS resolution ──────────────────────────────────
-python src/pipeline/resolve_dns.py https://suspicious-domain.xyz
-python src/pipeline/resolve_dns.py                    # test suite
+# (coming) Full pipeline on a URL
+python src/pipeline/build_graph.py https://target-domain.xyz
 
-# ── Future stages (coming soon) ───────────────────────────────
-python src/pipeline/fetch_whois.py <domain>
-python src/pipeline/fetch_cert.py  <domain>
-python src/pipeline/build_graph.py <url>
-python src/quantum/fingerprint.py  <url>
+# (coming) Compute quantum fingerprint
+python src/quantum/fingerprint.py --graph data/graphs/target.gpickle
+
+# (coming) Cluster and attribute
+python src/clustering/dbscan_cluster.py --embeddings results/phi_vectors.npy
 ```
 
 ---
 
-## ◈ Stage Progress
-
-| # | Stage | Description | Status |
-|---|-------|-------------|--------|
-| 0 | Foundation | Quantum walks, graph theory, GNN comparison | ✅ Complete |
-| 1a | `parse_url.py` | URL decomposition — TLD, subdomain, IP detection | ✅ Complete |
-| 1b | `resolve_dns.py` | DNS A / MX / PTR resolution → IP node | 🔄 In progress |
-| 1c | `fetch_whois.py` | WHOIS → registrar, org, creation date | ⏳ Pending |
-| 1c | `fetch_cert.py` | crt.sh → TLS cert fingerprint, shared-cert detection | ⏳ Pending |
-| 1d | `build_graph.py` | Assemble full NetworkX hypergraph G_i | ⏳ Pending |
-| 2 | `hamiltonian.py` | H = −A on any NetworkX graph | ⏳ Pending |
-| 2 | `walk.py` | U(t) = expm(−iHt) with multiple t values | ⏳ Pending |
-| 3 | `fingerprint.py` | φ(G) feature vector extraction + verification | ⏳ Pending |
-| 4 | `dbscan_cluster.py` | DBSCAN campaign clustering on φ(G) | ⏳ Pending |
-| 5 | `evaluate.py` | ARI, NMI, silhouette, UMAP paper figure | ⏳ Pending |
-
----
-
-## ◈ Why Quantum Walk, Not GraphSAGE
-
-| Property | GraphSAGE / GAT | EVELYN φ(G) |
-|----------|----------------|-------------|
-| Captures local structure (1–2 hop) | ✅ Yes | ✅ Yes |
-| Captures global topology | ⚠️ Requires deep networks | ✅ By construction |
-| Permutation-invariant | ⚠️ Not guaranteed | ✅ Provably |
-| Works on unseen topology patterns | ❌ Needs labelled examples | ✅ Zero-shot |
-| Fixed-dim output for variable-size graphs | ❌ Requires pooling heuristics | ✅ Native |
-| Label-blind (domain name irrelevant) | ❌ Node features matter | ✅ Topology only |
-
-The honest tradeoff: φ(G) costs O(n³) vs O(n·d) for GNNs. For campaign subgraphs where n < 100, this is milliseconds. The structural invariance guarantee is worth it.
-
----
-
-## ◈ Academic Context
+## ◈ MISSION PROGRESS
 
 ```
-Target venues  :  IEEE S&P  |  USENIX Security  |  CCS  |  NDSS
-Method         :  Continuous-time quantum walk on infrastructure hypergraphs
-Baseline comps :  GraphSAGE, GAT, lexical Random Forest, classical random walk
-Dataset        :  PhishTank (phishing) + Tranco top-1M (benign) — 1,000 URLs min
-Evaluation     :  ARI, NMI, silhouette score, zero-day attribution F1
+  STAGE 0  ████████████████████  COMPLETE  Quantum walk theory + graph foundations
+  STAGE 1a ████████████████████  COMPLETE  parse_url() — TLD-aware URL decomposition
+  STAGE 1b ████░░░░░░░░░░░░░░░░  ACTIVE    resolve_dns() — DNS A record resolution
+  STAGE 1c ░░░░░░░░░░░░░░░░░░░░  PENDING   fetch_whois() + fetch_cert()
+  STAGE 1d ░░░░░░░░░░░░░░░░░░░░  PENDING   build_graph() — NetworkX assembly
+  STAGE 2  ░░░░░░░░░░░░░░░░░░░░  PENDING   hamiltonian() + walk() — U(t)=expm(−iHt)
+  STAGE 3  ░░░░░░░░░░░░░░░░░░░░  PENDING   fingerprint() — φ(G) extraction
+  STAGE 4  ░░░░░░░░░░░░░░░░░░░░  PENDING   dbscan_cluster() — campaign attribution
+  STAGE 5  ░░░░░░░░░░░░░░░░░░░░  PENDING   evaluate() — ARI/NMI/F1 + UMAP figure
 ```
 
 ---
 
-## ◈ The Rule
+## ◈ ACADEMIC CONTEXT
 
-> Every function in `src/` — you write the first draft.  
-> It will be wrong. We debug it together. You understand the fix.  
-> No black boxes. No copy-paste without comprehension.  
-> A reviewer will ask why. You will have the answer.
+| | |
+|---|---|
+| **Method** | Continuous-time quantum walk on phishing infrastructure hypergraphs |
+| **Fingerprint** | φ(G) = \|⟨j\|e^{−iHt}\|k⟩\|² — permutation-invariant topology vector |
+| **Clustering** | DBSCAN on φ(G) embeddings (density-based, no fixed k required) |
+| **Evaluation** | ARI, NMI, silhouette score vs GraphSAGE / GAT / lexical RF baselines |
+| **Data** | PhishTank + passive DNS / WHOIS / crt.sh collection |
+| **Target venues** | IEEE S&P · USENIX Security · CCS · NDSS |
+
+---
+
+## ◈ THE RULE
+
+> Every function in `src/` — **you write the first draft.**  
+> It will be wrong. We debug it together. You learn from the bug.  
+> No copy-paste without comprehension. No moving forward until you can  
+> delete and rewrite every line from understanding.
 
 ---
 
 <div align="center">
 
-*This repository is private during active research. Do not distribute.*
+*This repository is private during active research.*  
+*Do not distribute. Do not share. Build first.*
 
-`EVELYN` · built line by line · understood end to end
+```
+[ EVELYN IS WATCHING ]
+```
 
 </div>
