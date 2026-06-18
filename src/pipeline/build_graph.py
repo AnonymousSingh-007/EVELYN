@@ -1,184 +1,265 @@
 # src/pipeline/build_graph.py
 #
-# PURPOSE: Take a single URL and build its complete "ego-graph" — a
-# NetworkX graph containing every node type we've collected (domain,
-# IP, registrar, certificate, shared-cert domains, ASN, geolocation,
-# co-hosted domains) and the edges connecting them. This is G_i — the
-# exact object the quantum walk in Stage 2 will consume.
-#
-# This file doesn't introduce NEW data collection logic. It is purely
-# an ORCHESTRATOR: it calls the seven functions you've already built
-# and tested, and wires their outputs together into one graph.
+# PURPOSE: Take a single URL and build its complete ego-graph as a
+# labeled NetworkX object. Now includes:
+#   - SSL metadata as node features (not just edges)
+#   - Edge weights encoding signal strength
+#   - Graph-level metadata dictionary for the paper's feature table
+#   - Serialization to disk (data/graphs/)
+#   - Graceful partial-graph returns — if 3/7 modules fail, you still
+#     get a graph with the 4 that succeeded, not an empty failure
 
 import networkx as nx
+import pickle
+from pathlib import Path
 
-from src.pipeline.parse_url import parse_url
-from src.pipeline.resolve_dns import resolve_dns
-from src.pipeline.fetch_whois import fetch_whois
-from src.pipeline.fetch_cert import fetch_cert
-from src.pipeline.fetch_asn import fetch_asn
-from src.pipeline.fetch_geo import fetch_geo
+from src.pipeline.parse_url          import parse_url
+from src.pipeline.resolve_dns        import resolve_dns
+from src.pipeline.fetch_whois        import fetch_whois
+from src.pipeline.fetch_cert         import fetch_cert
+from src.pipeline.fetch_asn          import fetch_asn
+from src.pipeline.fetch_geo          import fetch_geo
 from src.pipeline.check_shared_hosting import check_shared_hosting
+from src.pipeline.fetch_ssl_meta     import fetch_ssl_meta
 
 
-def build_graph(url: str, verbose: bool = True) -> nx.Graph:
+GRAPHS_DIR = Path("data/graphs")
+
+
+def build_graph(url: str,
+                label: int = None,
+                verbose: bool = True,
+                save: bool = False) -> nx.Graph:
     """
-    Builds a NetworkX graph for one URL by calling every pipeline
-    module and wiring their results into nodes and edges.
+    Builds a complete labeled NetworkX ego-graph for one URL.
 
-    Node types added (each tagged with a "type" attribute so later
-    code, like hamiltonian.py, can distinguish them if needed):
-      - domain    : the URL's registered domain
-      - ip        : resolved IP address(es)
-      - registrar : WHOIS registrar
-      - cert_peer : other domains sharing a TLS certificate
-      - asn       : hosting ASN
-      - geo       : country/city of the IP
-      - co_host   : other domains sharing the same IP
+    Parameters:
+        url     : the full URL to analyse
+        label   : 1 = phishing, 0 = benign, None = unknown
+        verbose : print step-by-step progress
+        save    : if True, serialise the graph to data/graphs/
 
-    Returns a networkx.Graph object. Use G.nodes(data=True) and
-    G.edges(data=True) to inspect it, or nx.write_gpickle() to save it.
+    Node attributes (always present, None if unavailable):
+        type, domain_age_days, cert_count, ttl,
+        is_self_signed, ssl_validity_days, ssl_days_to_expiry
+
+    Graph-level attributes (G.graph dict):
+        url, domain, label, node_count, edge_count,
+        modules_succeeded, modules_failed
+
+    Returns a nx.Graph. Even on partial failure, returns whatever
+    nodes were collected — never an empty graph from a partial failure.
     """
 
     G = nx.Graph()
+    modules_succeeded = []
+    modules_failed    = []
 
-    # ── Step 1: parse the URL ──────────────────────────────────────────
+    # ── Parse URL ──────────────────────────────────────────────────────
     parsed = parse_url(url)
     domain = parsed["full_domain"]
 
     if not domain:
         if verbose:
-            print(f"  ⚠ Could not extract a domain from this URL — likely a raw IP. Skipping.")
+            print(f"  ⚠ Could not extract domain from: {url}")
         return G
 
-    G.add_node(domain, type="domain", suffix=parsed["suffix"], is_ip=parsed["is_ip"])
+    # The domain node is the root of the entire ego-graph.
+    # We attach feature attributes directly to it here — these become
+    # node features in the adjacency matrix later.
+    G.add_node(domain, type="domain",
+               suffix=parsed["suffix"],
+               is_ip=parsed["is_ip"],
+               domain_age_days=None,
+               cert_count=None,
+               is_self_signed=None,
+               ssl_validity_days=None,
+               ssl_days_to_expiry=None)
 
     if verbose:
-        print(f"\n  Building graph for: {domain}")
+        print(f"\n  [build_graph] {domain}  label={'phishing' if label==1 else 'benign' if label==0 else '?'}")
+        print(f"  {'─'*52}")
 
-    # ── Step 2: DNS resolution ──────────────────────────────────────────
-    dns_result = resolve_dns(domain)
-    if dns_result["resolved"]:
-        for ip in dns_result["ips"]:
-            G.add_node(ip, type="ip", ttl=dns_result["ttl"])
-            G.add_edge(domain, ip, relation="resolves-to")
+    # ── DNS ────────────────────────────────────────────────────────────
+    dns = resolve_dns(domain)
+    if dns["resolved"]:
+        for ip in dns["ips"]:
+            # TTL as edge weight: low TTL = weaker/more evasive connection
+            # We normalize to 0-1 range by capping at 3600s (1 hour)
+            ttl_weight = min(dns["ttl"], 3600) / 3600 if dns["ttl"] else 0.5
+            G.add_node(ip, type="ip", ttl=dns["ttl"])
+            G.add_edge(domain, ip,
+                       relation="resolves-to",
+                       weight=ttl_weight)
+        modules_succeeded.append("dns")
         if verbose:
-            print(f"  ✓ DNS:        {len(dns_result['ips'])} IP(s) added")
-    elif verbose:
-        print(f"  ✗ DNS failed: {dns_result['error']}")
-
-    # ── Step 3: WHOIS ────────────────────────────────────────────────────
-    whois_result = fetch_whois(domain)
-    if whois_result["resolved"] and whois_result["registrar"]:
-        registrar = whois_result["registrar"]
-        G.add_node(registrar, type="registrar")
-        G.add_edge(domain, registrar, relation="registered-by")
-        # Store domain age directly on the domain node — this is a
-        # NODE FEATURE, not a separate node, since age is a property
-        # of the domain itself, not a distinct entity it connects to.
-        G.nodes[domain]["domain_age_days"] = whois_result["domain_age_days"]
+            print(f"  ✓ DNS:         {len(dns['ips'])} IP(s)")
+    else:
+        modules_failed.append(f"dns:{dns['error']}")
         if verbose:
-            print(f"  ✓ WHOIS:      registrar = {registrar}, age = {whois_result['domain_age_days']} days")
-    elif verbose:
-        print(f"  ✗ WHOIS failed or no registrar: {whois_result['error']}")
+            print(f"  ✗ DNS:         {dns['error']}")
 
-    # ── Step 4: Certificate transparency ────────────────────────────────
-    cert_result = fetch_cert(domain)
-    if cert_result["resolved"]:
-        for shared_domain in cert_result["shared_domains"]:
-            G.add_node(shared_domain, type="cert_peer")
-            G.add_edge(domain, shared_domain, relation="shares-cert")
-        G.nodes[domain]["cert_count"] = cert_result["cert_count"]
+    # ── WHOIS ──────────────────────────────────────────────────────────
+    whois = fetch_whois(domain)
+    if whois["resolved"] and whois["registrar"]:
+        reg = whois["registrar"]
+        G.add_node(reg, type="registrar")
+        # Edge weight: younger domain = higher suspicion = lower weight
+        # A 1-day-old domain has weight ~0. A 10-year-old domain has weight ~1.
+        age = whois["domain_age_days"] or 0
+        age_weight = min(age, 3650) / 3650  # cap at 10 years
+        G.add_edge(domain, reg,
+                   relation="registered-by",
+                   weight=age_weight)
+        G.nodes[domain]["domain_age_days"] = whois["domain_age_days"]
+        modules_succeeded.append("whois")
         if verbose:
-            print(f"  ✓ Cert:       {cert_result['cert_count']} certs, "
-                  f"{len(cert_result['shared_domains'])} shared-cert peer(s) "
-                  f"(source: {cert_result.get('source')})")
-    elif verbose:
-        print(f"  ✗ Cert failed: {cert_result['error']}")
+            print(f"  ✓ WHOIS:       {reg}, age={whois['domain_age_days']}d")
+    else:
+        modules_failed.append(f"whois:{whois.get('error')}")
+        if verbose:
+            print(f"  ✗ WHOIS:       {whois.get('error')}")
 
-    # ── Step 5: ASN + Geo + shared hosting (per IP) ─────────────────────
-    if dns_result["resolved"]:
-        for ip in dns_result["ips"]:
+    # ── Certificate transparency ───────────────────────────────────────
+    cert = fetch_cert(domain)
+    if cert["resolved"]:
+        for peer in cert["shared_domains"]:
+            G.add_node(peer, type="cert_peer")
+            # Shared cert peers all have weight 1.0 — this is a
+            # cryptographic certainty, not a probabilistic inference.
+            G.add_edge(domain, peer,
+                       relation="shares-cert",
+                       weight=1.0)
+        G.nodes[domain]["cert_count"] = cert["cert_count"]
+        modules_succeeded.append("cert")
+        if verbose:
+            print(f"  ✓ Cert:        {cert['cert_count']} certs, "
+                  f"{len(cert['shared_domains'])} peers (via {cert.get('source')})")
+    else:
+        modules_failed.append(f"cert:{cert.get('error')}")
+        if verbose:
+            print(f"  ✗ Cert:        {cert.get('error')}")
 
-            asn_result = fetch_asn(ip)
-            if asn_result["resolved"] and asn_result["asn"]:
-                asn_node = f"{asn_result['asn']} ({asn_result['as_name']})"
-                G.add_node(asn_node, type="asn")
-                G.add_edge(ip, asn_node, relation="hosted-in")
-                if verbose:
-                    print(f"  ✓ ASN ({ip}): {asn_node}")
-            elif verbose:
-                print(f"  ✗ ASN failed for {ip}: {asn_result['error']}")
+    # ── SSL metadata (node features, not new graph nodes) ─────────────
+    ssl = fetch_ssl_meta(domain)
+    if ssl["resolved"]:
+        G.nodes[domain]["is_self_signed"]      = ssl["is_self_signed"]
+        G.nodes[domain]["ssl_validity_days"]   = ssl["validity_days"]
+        G.nodes[domain]["ssl_days_to_expiry"]  = ssl["days_until_expiry"]
+        modules_succeeded.append("ssl")
+        if verbose:
+            print(f"  ✓ SSL:         issuer={ssl['issuer']}, "
+                  f"validity={ssl['validity_days']}d, "
+                  f"self_signed={ssl['is_self_signed']}")
+    else:
+        modules_failed.append(f"ssl:{ssl.get('error')}")
+        if verbose:
+            print(f"  ✗ SSL:         {ssl.get('error')}")
 
-            geo_result = fetch_geo(ip)
-            if geo_result["resolved"] and geo_result["country"]:
-                geo_node = f"{geo_result['city']}, {geo_result['country']}"
-                G.add_node(geo_node, type="geo")
-                G.add_edge(ip, geo_node, relation="located-in")
-                if verbose:
-                    print(f"  ✓ Geo ({ip}): {geo_node}")
-            elif verbose:
-                print(f"  ✗ Geo failed for {ip}: {geo_result['error']}")
+    # ── ASN + Geo + shared hosting (per IP node) ───────────────────────
+    for node, data in list(G.nodes(data=True)):
+        if data.get("type") != "ip":
+            continue
+        ip = node
 
-            host_result = check_shared_hosting(ip)
-            if host_result["resolved"]:
-                # Cap co-hosted domains we add as nodes — some IPs (like
-                # 8.8.8.8) return hundreds, which would bloat the graph
-                # with noise rather than signal. We keep this configurable
-                # via a constant so it's easy to tune later.
-                MAX_CO_HOST_NODES = 15
-                for co_domain in host_result["co_hosted_domains"][:MAX_CO_HOST_NODES]:
-                    G.add_node(co_domain, type="co_host")
-                    G.add_edge(ip, co_domain, relation="also-hosts")
-                if verbose:
-                    print(f"  ✓ Shared hosting ({ip}): {host_result['count']} found, "
-                          f"{min(host_result['count'], MAX_CO_HOST_NODES)} added to graph")
-            elif verbose:
-                print(f"  ✗ Shared hosting failed for {ip}: {host_result['error']}")
+        asn = fetch_asn(ip)
+        if asn["resolved"] and asn["asn"]:
+            asn_node = f"{asn['asn']}|{asn['as_name']}"
+            G.add_node(asn_node, type="asn",
+                       country=asn["country"])
+            G.add_edge(ip, asn_node,
+                       relation="hosted-in",
+                       weight=1.0)
+            if "asn" not in modules_succeeded:
+                modules_succeeded.append("asn")
+        else:
+            if "asn" not in modules_failed:
+                modules_failed.append(f"asn:{asn.get('error')}")
+
+        geo = fetch_geo(ip)
+        if geo["resolved"] and geo["country"]:
+            geo_node = f"{geo['city']}|{geo['country']}"
+            G.add_node(geo_node, type="geo",
+                       lat=geo["lat"], lon=geo["lon"],
+                       isp=geo["isp"])
+            G.add_edge(ip, geo_node,
+                       relation="located-in",
+                       weight=1.0)
+            if "geo" not in modules_succeeded:
+                modules_succeeded.append("geo")
+        else:
+            if "geo" not in modules_failed:
+                modules_failed.append(f"geo:{geo.get('error')}")
+
+        shared = check_shared_hosting(ip)
+        if shared["resolved"]:
+            MAX_CO_HOST = 15
+            for co in shared["co_hosted_domains"][:MAX_CO_HOST]:
+                G.add_node(co, type="co_host")
+                G.add_edge(ip, co,
+                           relation="also-hosts",
+                           weight=0.5)
+            if "shared" not in modules_succeeded:
+                modules_succeeded.append("shared")
+        else:
+            if "shared" not in modules_failed:
+                modules_failed.append(f"shared:{shared.get('error')}")
+
+    # ── Attach graph-level metadata ────────────────────────────────────
+    # G.graph is a dictionary that travels with the graph object everywhere.
+    # This metadata is what your batch pipeline and evaluation code will
+    # read later — it's the "label" and "quality" info for this graph.
+    G.graph.update({
+        "url":               url,
+        "domain":            domain,
+        "label":             label,
+        "node_count":        G.number_of_nodes(),
+        "edge_count":        G.number_of_edges(),
+        "modules_succeeded": modules_succeeded,
+        "modules_failed":    modules_failed,
+    })
+
+    # ── Serialise to disk ──────────────────────────────────────────────
+    if save:
+        GRAPHS_DIR.mkdir(parents=True, exist_ok=True)
+        safe_name = domain.replace(".", "_").replace("/", "_")
+        label_tag = f"_L{label}" if label is not None else ""
+        path = GRAPHS_DIR / f"{safe_name}{label_tag}.pkl"
+        with open(path, "wb") as f:
+            pickle.dump(G, f)
+        G.graph["saved_path"] = str(path)
+        if verbose:
+            print(f"\n  Saved → {path}")
 
     return G
 
 
 def print_graph_summary(G: nx.Graph) -> None:
-    """Prints a quick summary of a built graph — node/edge counts by type."""
     print(f"\n  {'─'*52}")
-    print(f"  GRAPH SUMMARY")
-    print(f"  {'─'*52}")
-    print(f"  Total nodes: {G.number_of_nodes()}")
-    print(f"  Total edges: {G.number_of_edges()}")
-
-    # Count nodes by their "type" attribute
+    print(f"  GRAPH SUMMARY — {G.graph.get('domain', '?')}")
+    print(f"  label:   {G.graph.get('label')} "
+          f"({'phishing' if G.graph.get('label')==1 else 'benign' if G.graph.get('label')==0 else 'unknown'})")
+    print(f"  nodes:   {G.number_of_nodes()}")
+    print(f"  edges:   {G.number_of_edges()}")
+    print(f"  modules: ✓ {G.graph.get('modules_succeeded')}  "
+          f"✗ {G.graph.get('modules_failed')}")
     type_counts = {}
-    for node, data in G.nodes(data=True):
-        node_type = data.get("type", "unknown")
-        type_counts[node_type] = type_counts.get(node_type, 0) + 1
-
-    for node_type, count in sorted(type_counts.items()):
-        print(f"    {node_type:12s}: {count}")
+    for _, data in G.nodes(data=True):
+        t = data.get("type", "?")
+        type_counts[t] = type_counts.get(t, 0) + 1
+    for t, c in sorted(type_counts.items()):
+        print(f"    {t:14s}: {c}")
     print(f"  {'─'*52}")
 
 
 # ── SELF-TEST ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
+    url = sys.argv[1] if len(sys.argv) > 1 else "https://github.com"
+    label = int(sys.argv[2]) if len(sys.argv) > 2 else None
 
-    if len(sys.argv) > 1:
-        url = sys.argv[1]
-        print("\n" + "=" * 58)
-        print("  EVELYN — build_graph()")
-        print("=" * 58)
-        G = build_graph(url)
-        print_graph_summary(G)
-
-        print(f"\n  All nodes:")
-        for node, data in G.nodes(data=True):
-            print(f"    {node}  [{data.get('type', '?')}]")
-
-    else:
-        print("\n" + "=" * 58)
-        print("  EVELYN — build_graph() test suite")
-        print("=" * 58)
-        print("  NOTE: this calls all 7 pipeline modules — will take 10-30 seconds")
-
-        G = build_graph("https://github.com")
-        print_graph_summary(G)
+    print("\n" + "=" * 58)
+    print("  EVELYN — build_graph()")
+    print("=" * 58)
+    G = build_graph(url, label=label, verbose=True, save=True)
+    print_graph_summary(G)
