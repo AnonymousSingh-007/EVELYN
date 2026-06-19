@@ -268,6 +268,8 @@ def build_graph(url: str,
         "edge_count":        G.number_of_edges(),
         "modules_succeeded": modules_succeeded,
         "modules_failed":    modules_failed,
+        # "truncated" and "truncated_counts" already set above — this
+        # update() call will not overwrite them since they're not keys here
     })
 
     # ── Serialise to disk ──────────────────────────────────────────────
@@ -292,6 +294,8 @@ def print_graph_summary(G: nx.Graph) -> None:
           f"({'phishing' if G.graph.get('label')==1 else 'benign' if G.graph.get('label')==0 else 'unknown'})")
     print(f"  nodes:   {G.number_of_nodes()}")
     print(f"  edges:   {G.number_of_edges()}")
+    if G.graph.get("truncated"):
+        print(f"  ⚠ truncated: {G.graph.get('truncated_counts')}")
     print(f"  modules: ✓ {G.graph.get('modules_succeeded')}  "
           f"✗ {G.graph.get('modules_failed')}")
     type_counts = {}
