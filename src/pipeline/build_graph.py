@@ -205,6 +205,57 @@ def build_graph(url: str,
             if "shared" not in modules_failed:
                 modules_failed.append(f"shared:{shared.get('error')}")
 
+    # ── Enforce hard node budget ────────────────────────────────────────
+    # Some domains (Google, Cloudflare, major CDNs) produce graphs with
+    # 500-1000+ nodes because they have massive cert footprints and
+    # thousands of co-hosted domains on shared infrastructure. This is
+    # an architectural fact about hyperscaler infrastructure, not signal
+    # about phishing/benign status — and it makes the quantum walk
+    # computationally infeasible (O(n^3) on n=1000 is ~1 billion ops
+    # PER time step, per graph).
+    #
+    # We cap every graph at MAX_NODES total, keeping high-priority node
+    # types (domain, ip, registrar, asn, geo — the "core identity" of
+    # the infrastructure) and trimming low-priority, high-volume types
+    # (cert_peer, co_host) first. This is local ego-graph extraction,
+    # not full graph truncation — it's a deliberate, documented design
+    # choice, not data loss.
+    MAX_NODES = 50
+    TRIM_PRIORITY = ["co_host", "cert_peer"]   # trimmed first, in this order
+    MAX_PER_TRIMMED_TYPE = {"cert_peer": 5, "co_host": 3}
+
+    if G.number_of_nodes() > MAX_NODES:
+        truncated_counts = {}
+
+        for node_type in TRIM_PRIORITY:
+            if G.number_of_nodes() <= MAX_NODES:
+                break
+
+            # Find all nodes of this type, EXCLUDING the root domain
+            # (which is never trimmed regardless of its own type tag)
+            nodes_of_type = [
+                n for n, d in G.nodes(data=True)
+                if d.get("type") == node_type and n != domain
+            ]
+
+            keep_n = MAX_PER_TRIMMED_TYPE.get(node_type, 5)
+            to_remove = nodes_of_type[keep_n:]   # keep first `keep_n`, drop rest
+
+            G.remove_nodes_from(to_remove)
+            if to_remove:
+                truncated_counts[node_type] = len(to_remove)
+
+        if truncated_counts and verbose:
+            print(f"  ⚠ TRUNCATED for node budget (max={MAX_NODES}): {truncated_counts}")
+
+        # Record this truncation event — essential for the paper's
+        # methods/limitations section, and for filtering analysis later
+        G.graph["truncated"] = bool(truncated_counts)
+        G.graph["truncated_counts"] = truncated_counts
+    else:
+        G.graph["truncated"] = False
+        G.graph["truncated_counts"] = {}
+
     # ── Attach graph-level metadata ────────────────────────────────────
     # G.graph is a dictionary that travels with the graph object everywhere.
     # This metadata is what your batch pipeline and evaluation code will
