@@ -146,7 +146,33 @@ def _load_benign_jobs(benign_csv: str, max_benign: int, seen_domains: set) -> li
     return jobs
 
 
-def run_batch(phishing_csv:  str   = "data/raw/phishtank_2026.csv",
+def _migrate_or_archive_stale_results(results_file: Path) -> None:
+    """
+    Checks if an existing results CSV has the CURRENT schema (same column
+    set as RESULT_FIELDNAMES). If it has an OLDER schema (e.g. from before
+    the truncation columns were added), we archive it with a timestamp
+    instead of appending mismatched rows into it — appending different
+    schemas into one CSV is exactly what caused the ParserError you hit.
+    """
+    if not results_file.exists():
+        return
+
+    with open(results_file, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        try:
+            existing_header = next(reader)
+        except StopIteration:
+            return   # empty file, nothing to migrate
+
+    if existing_header == RESULT_FIELDNAMES:
+        return   # schema matches, safe to append
+
+    # Schema mismatch — archive the old file rather than corrupt it
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    archive_path = results_file.with_name(f"{results_file.stem}_old_schema_{timestamp}.csv")
+    results_file.rename(archive_path)
+    print(f"  ⚠ Old results schema detected. Archived previous file → {archive_path}")
+    print(f"    A fresh {results_file.name} will be started with the current schema.")
               benign_csv:    str   = "data/raw/benign_2026-06-18.csv",
               max_phishing:  int   = 500,
               max_benign:    int   = 500,
@@ -183,6 +209,8 @@ def run_batch(phishing_csv:  str   = "data/raw/phishtank_2026.csv",
 
     # ── Set up results CSV (append mode, write header only if new) ─────
     RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _migrate_or_archive_stale_results(RESULTS_FILE)
+
     write_header = not RESULTS_FILE.exists()
     results_f = open(RESULTS_FILE, "a", newline="", encoding="utf-8")
     writer = csv.DictWriter(results_f, fieldnames=RESULT_FIELDNAMES)
@@ -230,10 +258,20 @@ def _flag_dead_benign_domains(results_file: Path) -> None:
     a taken-down phishing domain still carries WHOIS/cert traces that
     support retrospective campaign attribution, which is a real-world
     use case for this system, not noise.
+
+    This runs AFTER the batch already completed and graphs are already
+    saved to disk — so if THIS step fails for any reason, we report it
+    clearly but do not treat it as a batch failure. Your graphs are safe
+    either way; this only affects the convenience column in the CSV.
     """
     import pandas as pd
 
-    df = pd.read_csv(results_file)
+    try:
+        df = pd.read_csv(results_file, on_bad_lines="warn")
+    except Exception as e:
+        print(f"  ⚠ Could not post-process results CSV for usable_for_training: {e}")
+        print(f"    Your batch run and saved graphs are unaffected — this is cosmetic.")
+        return
 
     def is_usable(row):
         if row["label"] == 0:
