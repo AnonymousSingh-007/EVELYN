@@ -24,45 +24,41 @@ CERTSPOTTER_URL   = "https://api.certspotter.com/v1/issuances"
 
 
 def fetch_cert(domain: str, timeout: float = 10.0, max_retries: int = 1) -> dict:
-    """
-    Queries Certificate Transparency logs for certs issued to this domain.
-    Tries crt.sh first (most complete), falls back to CertSpotter if
-    crt.sh fails. Returns which source actually succeeded so you can
-    track this in your dataset for transparency in the paper.
-
-    Example output:
-    {
-        "domain":          "secure-bank-login.xyz",
-        "cert_count":      2,
-        "shared_domains":  ["other-phish-domain.xyz"],
-        "issuer":          "Let's Encrypt",
-        "source":          "crt.sh",
-        "resolved":        True,
-        "error":           None
-    }
-    """
+    """... (existing docstring) ..."""
 
     if "://" in domain or "/" in domain:
         return _failure(domain, "InvalidInput: pass a bare domain, not a full URL")
+
+    # ── Check cache first — zero-cost, zero-API-call lookup ─────────────
+    # This is the single highest-leverage fix for the rate-limiting you
+    # hit under recursive expansion: research workflows re-query the
+    # same domains constantly (re-running batches, debugging, building
+    # figures), and a 7-day cache eliminates almost all of that repeat
+    # traffic without costing anything or needing any new account.
+    cached = get_cached(domain)
+    if cached is not None:
+        return cached
 
     # Try crt.sh first — it's the most complete public CT log search.
     result = _query_crtsh(domain, timeout, max_retries)
     if result["resolved"]:
         result["source"] = "crt.sh"
+        set_cached(domain, result)   # ← save successful result for next time
         return result
 
     crtsh_error = result["error"]
 
-    # crt.sh failed — fall back to CertSpotter.
     result = _query_certspotter(domain, timeout)
     if result["resolved"]:
         result["source"] = "certspotter"
+        set_cached(domain, result)   # ← save successful result for next time
         return result
 
-    # Both sources failed. Report both errors so you can see the full
-    # picture when debugging a batch run later.
+    # Both sources failed — we deliberately do NOT cache failures, since
+    # a failure is often transient (crt.sh being overloaded RIGHT NOW),
+    # and caching it would mean we never retry a domain that might
+    # succeed on the very next attempt a few minutes later.
     return _failure(domain, f"Both sources failed. crt.sh: {crtsh_error} | certspotter: {result['error']}")
-
 
 def _query_crtsh(domain: str, timeout: float, max_retries: int) -> dict:
     """Queries crt.sh. Retries once on transient failure (502/timeout)."""
