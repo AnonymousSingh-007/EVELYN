@@ -173,6 +173,9 @@ def _migrate_or_archive_stale_results(results_file: Path) -> None:
     results_file.rename(archive_path)
     print(f"  ⚠ Old results schema detected. Archived previous file → {archive_path}")
     print(f"    A fresh {results_file.name} will be started with the current schema.")
+
+
+def run_batch(phishing_csv:  str   = "data/raw/phishtank_2026.csv",
               benign_csv:    str   = "data/raw/benign_2026-06-18.csv",
               max_phishing:  int   = 500,
               max_benign:    int   = 500,
