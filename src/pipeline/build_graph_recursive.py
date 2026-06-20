@@ -172,19 +172,40 @@ def build_graph_recursive(seed_url: str,
     return combined
 
 
-def _get_expandable_leaves(G: nx.Graph, already_expanded: set) -> list:
+def _get_expandable_leaves(G: nx.Graph, already_expanded: set,
+                            apply_suspicion_filter: bool = True) -> list:
     """
-    Finds cert_peer and co_host nodes in a graph that haven't been
-    expanded yet. These are domain-name STRINGS (not yet investigated),
-    which is exactly what makes them "expandable" — we can run
-    build_graph() on them to discover what infrastructure THEY connect to.
+    Finds cert_peer and co_host nodes worth expanding further.
+
+    apply_suspicion_filter: if True (default), co_host nodes must show
+    an independent suspicion signal (new registration, suspicious TLD,
+    hyphen-heavy name) to be kept. cert_peer nodes are NEVER filtered
+    this way — a shared TLS certificate is already cryptographic proof
+    of common ownership, which is a stronger signal than anything the
+    suspicion filter checks, so filtering cert_peer would throw away
+    your best evidence.
     """
-    leaves = []
+    cert_peer_leaves = []
+    co_host_candidates = []
+
     for node, data in G.nodes(data=True):
         node_type = data.get("type")
-        if node_type in ("cert_peer", "co_host") and node not in already_expanded:
-            leaves.append(node)
-    return leaves
+        if node in already_expanded:
+            continue
+        if node_type == "cert_peer":
+            cert_peer_leaves.append(node)
+        elif node_type == "co_host":
+            co_host_candidates.append(node)
+
+    if apply_suspicion_filter and co_host_candidates:
+        print(f"\n    Applying suspicion filter to {len(co_host_candidates)} co_host candidate(s)...")
+        co_host_leaves = filter_suspicious_domains(
+            co_host_candidates, skip_whois=False, verbose=True
+        )
+    else:
+        co_host_leaves = co_host_candidates
+
+    return cert_peer_leaves + co_host_leaves
 
 
 def print_recursive_summary(G: nx.Graph) -> None:
