@@ -16,6 +16,7 @@
 
 import requests
 import time
+from src.pipeline.cert_cache import get_cached, set_cached
 
 
 CRT_SH_URL        = "https://crt.sh/"
