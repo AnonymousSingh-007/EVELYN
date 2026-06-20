@@ -26,6 +26,7 @@ import pickle
 import time
 
 from src.pipeline.build_graph import build_graph
+from src.pipeline.suspicion_filter import filter_suspicious_domains
 
 
 GRAPHS_DIR = Path("data/graphs")
