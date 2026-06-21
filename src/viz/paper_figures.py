@@ -158,9 +158,77 @@ def figure_example_graph(graph_pkl_path: str, title: str = None) -> None:
     _save(fig, f"fig02_example_graph_{safe_name}")
 
 
-# ═══════════════════════════════════════════════════════════════════
-# STAGE 2 FIGURE — Numerical validation summary (hermiticity, unitarity)
-# ═══════════════════════════════════════════════════════════════════
+def figure_recursive_hypergraph(graph_pkl_path: str, title: str = None) -> None:
+    """
+    Visualizes a RECURSIVE multi-hop graph (from build_graph_recursive.py),
+    color-coding nodes by node TYPE (same palette as figure_example_graph)
+    but additionally sizing nodes by degree, so hub domains (the ones
+    that drove expansion) are visually obvious. This is the figure that
+    shows a reviewer "here is what a real, suspicion-filtered, recursively
+    expanded campaign investigation actually looks like" — qualitative
+    evidence to accompany your quantitative clustering results.
+
+    Use this instead of figure_example_graph() specifically for graphs
+    produced by build_graph_recursive.py — it additionally annotates
+    which domains were FULLY EXPANDED (their own ego-graph was built)
+    vs. which are still just discovered LEAF labels never investigated,
+    using the graph's "expansion_log" metadata.
+    """
+    with open(graph_pkl_path, "rb") as f:
+        G = pickle.load(f)
+
+    type_colors = {
+        "domain":    "#D85A30",
+        "ip":        "#D4537E",
+        "registrar": "#1D9E75",
+        "cert_peer": "#378ADD",
+        "asn":       "#7F77DD",
+        "geo":       "#5BA88A",
+        "co_host":   "#C9A227",
+        "favicon":   "#9B59B6",
+    }
+
+    expansion_log = G.graph.get("expansion_log", [])
+    expanded_domains = {e["domain"] for e in expansion_log if e.get("status") == "expanded"}
+
+    fig, ax = plt.subplots(figsize=(7, 6.5))
+    pos = nx.spring_layout(G, seed=11, k=0.5, iterations=100)
+
+    degrees = dict(G.degree())
+    max_deg = max(degrees.values()) if degrees else 1
+
+    for node_type, color in type_colors.items():
+        nodes_of_type = [n for n, d in G.nodes(data=True) if d.get("type") == node_type]
+        if not nodes_of_type:
+            continue
+        sizes = [80 + 280 * (degrees.get(n, 1) / max_deg) for n in nodes_of_type]
+        nx.draw_networkx_nodes(G, pos, nodelist=nodes_of_type, node_color=color,
+                                node_size=sizes, ax=ax, label=node_type, alpha=0.85,
+                                edgecolors="white", linewidths=0.6)
+
+    nx.draw_networkx_edges(G, pos, edge_color="#999999", width=0.6, alpha=0.5, ax=ax)
+
+    # Ring the FULLY EXPANDED domains with a black outline — these are
+    # the nodes where we ran the complete pipeline, not just a discovered label
+    expanded_nodes = [n for n in G.nodes() if n in expanded_domains or
+                      G.nodes[n].get("type") == "domain"]
+    if expanded_nodes:
+        nx.draw_networkx_nodes(G, pos, nodelist=expanded_nodes, node_color="none",
+                                node_size=320, ax=ax, edgecolors="black", linewidths=1.2)
+
+    ax.legend(loc="upper left", fontsize=7, frameon=False, markerscale=0.6,
+              title="Node type (size = degree)", title_fontsize=7)
+    ax.set_title(title or f"Recursive campaign graph "
+                 f"({G.number_of_nodes()} nodes, {len(expanded_domains)+1} domains expanded)",
+                 fontsize=10)
+    ax.axis("off")
+
+    fig.tight_layout()
+    domain = G.graph.get("domain", "unknown").replace(".", "_")
+    _save(fig, f"fig06_recursive_hypergraph_{domain}")
+
+
+
 
 def figure_numerical_validation(eigenvalue_diffs: list, unitarity_checks: dict) -> None:
     """
