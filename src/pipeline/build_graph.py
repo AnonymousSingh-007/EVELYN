@@ -21,7 +21,7 @@ from src.pipeline.fetch_asn          import fetch_asn
 from src.pipeline.fetch_geo          import fetch_geo
 from src.pipeline.check_shared_hosting import check_shared_hosting
 from src.pipeline.fetch_ssl_meta     import fetch_ssl_meta
-
+from src.pipeline.fetch_page_meta import fetch_page_meta
 
 GRAPHS_DIR = Path("data/graphs")
 
