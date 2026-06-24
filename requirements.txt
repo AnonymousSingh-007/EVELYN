@@ -9,6 +9,11 @@ requests>=2.28.0         # HTTP requests (also used by tldextract)
 dnspython>=2.4.0         # DNS resolution (resolve_dns.py)
 python-whois>=0.9.0      # WHOIS registrar lookup (fetch_whois.py)
 
+# ── Threat-hunting depth modules ──────────────────────────
+pyjarm>=0.0.5             # JARM TLS server fingerprinting (fetch_jarm.py)
+                          # Catches shared phishing-kit server configs
+                          # even when certs/domains differ completely.
+
 # ── Graph construction ────────────────────────────────────
 networkx>=3.2            # Graph data structures (build_graph.py)
 
@@ -26,3 +31,9 @@ matplotlib>=3.8.0        # Plots and figures for the paper
 # ── Utilities ─────────────────────────────────────────────
 pandas>=2.1.0            # CSV handling for the dataset
 tqdm>=4.66.0             # Progress bars for long pipeline runs
+
+# ── Notes on optional/external tooling ────────────────────
+# crt.sh and CertSpotter are queried via plain HTTP (requests) —
+# no dedicated package needed, see fetch_cert.py for the dual-source
+# fallback strategy. ip-api.com (fetch_geo.py) and rdap.org
+# (fetch_asn.py) are likewise queried via plain requests.
