@@ -50,12 +50,27 @@ def check_shared_hosting(ip: str, timeout: float = 10.0) -> dict:
         text = response.text.strip()
 
         if "API count exceeded" in text or "error" in text.lower():
-            return _failure(ip, f"APIError: {text}")
+            return _failure(ip, f"APIError: {text[:200]}")
 
         if not text or text == "":
             domains = []
         else:
             domains = [line.strip() for line in text.split("\n") if line.strip()]
+
+        # GUARD: HackerTarget's free tier occasionally returns a body that
+        # passes the basic checks above but is actually a malformed or
+        # rate-limited response containing an implausibly large number of
+        # "domains" — observed in practice as a multi-thousand-line dump
+        # unrelated to the queried IP. A single IP legitimately co-hosting
+        # thousands of domains is rare enough (and capped downstream by
+        # build_graph.py's MAX_CO_HOST anyway) that an extreme count is
+        # safer treated as an API malfunction signal than as real data.
+        MAX_PLAUSIBLE_CO_HOSTS = 2000
+        if len(domains) > MAX_PLAUSIBLE_CO_HOSTS:
+            return _failure(
+                ip, f"SuspiciousResponse: {len(domains)} entries returned — "
+                    f"likely malformed/rate-limited, not real co-host data"
+            )
 
         return {
             "ip":                ip,
