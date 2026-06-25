@@ -127,7 +127,15 @@ def build_and_visualize_3d(domain_or_url: str, label: int = None,
 
     positions = _spectral_layout_3d(G) if layout == "spectral" else _layered_layout_3d(G)
     findings = _extract_key_findings(G)
-    fig = _build_plotly_figure(G, positions, domain_or_url, label, findings, layout)
+
+    # Two variants: the INTERACTIVE html stays clean (hover already
+    # explains every edge, so text labels would just clutter rotation).
+    # The STATIC jpg/pdf gets edge labels baked in, since that's the
+    # only way a reader can understand connections without hovering.
+    fig_interactive = _build_plotly_figure(G, positions, domain_or_url, label,
+                                            findings, layout, show_edge_labels=False)
+    fig_static = _build_plotly_figure(G, positions, domain_or_url, label,
+                                       findings, layout, show_edge_labels=True)
 
     result = {"graph": G, "html_path": None, "jpg_path": None, "pdf_path": None}
 
@@ -137,14 +145,14 @@ def build_and_visualize_3d(domain_or_url: str, label: int = None,
         base_name = f"fig3d_{domain}_{layout}"
 
         html_path = FIGURES_DIR / f"{base_name}.html"
-        fig.write_html(str(html_path), include_plotlyjs="cdn")
+        fig_interactive.write_html(str(html_path), include_plotlyjs="cdn")
         result["html_path"] = str(html_path)
 
         try:
             jpg_path = FIGURES_DIR / f"{base_name}.jpg"
             pdf_path = FIGURES_DIR / f"{base_name}.pdf"
-            fig.write_image(str(jpg_path), width=2400, height=1500, scale=1)
-            fig.write_image(str(pdf_path), width=2400, height=1500)
+            fig_static.write_image(str(jpg_path), width=2400, height=1500, scale=1)
+            fig_static.write_image(str(pdf_path), width=2400, height=1500)
             result["jpg_path"] = str(jpg_path)
             result["pdf_path"] = str(pdf_path)
         except Exception as e:
@@ -154,8 +162,8 @@ def build_and_visualize_3d(domain_or_url: str, label: int = None,
         if verbose:
             print(f"\n  ✓ Interactive (rotate/zoom/hover) → {html_path}")
             if result["jpg_path"]:
-                print(f"  ✓ High-res JPEG (paper/slides)    → {result['jpg_path']}")
-                print(f"  ✓ Vector PDF (LaTeX)              → {result['pdf_path']}")
+                print(f"  ✓ High-res JPEG, edges labeled    → {result['jpg_path']}")
+                print(f"  ✓ Vector PDF, edges labeled       → {result['pdf_path']}")
 
     return result
 
@@ -227,8 +235,22 @@ def _extract_key_findings(G: nx.Graph) -> list:
     return findings[:3]
 
 
+EDGE_PLAIN_LABEL = {
+    "resolves-to":        "points to",
+    "registered-by":      "registered by",
+    "shares-cert":        "shares certificate",
+    "hosted-in":          "hosted on",
+    "located-in":         "located in",
+    "also-hosts":         "shares server with",
+    "uses-favicon":       "shares page icon",
+    "has-subdomain":      "sub-page of",
+    "server-fingerprint": "shares server fingerprint",
+}
+
+
 def _build_plotly_figure(G: nx.Graph, positions: dict, domain_or_url: str,
-                          label, findings: list, layout: str) -> "go.Figure":
+                          label, findings: list, layout: str,
+                          show_edge_labels: bool = True) -> "go.Figure":
 
     edge_x, edge_y, edge_z = [], [], []
     for u, v in G.edges():
@@ -245,6 +267,65 @@ def _build_plotly_figure(G: nx.Graph, positions: dict, domain_or_url: str,
         hoverinfo="none", showlegend=False,
     )
     traces = [edge_trace]
+
+    # ── Edge relationship labels — THE FIX ──────────────────────────────
+    # A JPEG/PDF has no hover, so a line connecting two nodes means
+    # nothing to a reader unless the relationship is written directly
+    # on the figure. We place a small plain-language label at the
+    # MIDPOINT of each edge (e.g. "shares certificate", "hosted on").
+    #
+    # With many edges this can get visually busy, so we deduplicate:
+    # if 5 edges all say "shares server with" radiating from the same
+    # hub node, we only label ONE of them and add a small "(+4 more)"
+    # suffix, rather than stamping the same text five times in a
+    # cluttered starburst — this is exactly what a human analyst
+    # annotating a printout by hand would do.
+    if show_edge_labels:
+        edge_groups = {}   # (relation) -> list of (u, v) pairs
+        for u, v, data in G.edges(data=True):
+            relation = data.get("relation", "connected to")
+            edge_groups.setdefault(relation, []).append((u, v))
+
+        label_x, label_y, label_z, label_text = [], [], [], []
+
+        for relation, pairs in edge_groups.items():
+            plain = EDGE_PLAIN_LABEL.get(relation, relation.replace("-", " "))
+
+            # Group further by the SOURCE node, so a hub with many
+            # identical-relation edges gets ONE labeled line + a count,
+            # instead of one label per edge.
+            by_source = {}
+            for u, v in pairs:
+                by_source.setdefault(u, []).append(v)
+
+            for source, targets in by_source.items():
+                # Label only the first edge from this source for this
+                # relation type; suffix with a count if there are more.
+                u, v = source, targets[0]
+                if u not in positions or v not in positions:
+                    continue
+                x0, y0, z0 = positions[u]
+                x1, y1, z1 = positions[v]
+                mx, my, mz = (x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2
+
+                text = plain
+                if len(targets) > 1:
+                    text = f"{plain} (+{len(targets) - 1} more)"
+
+                label_x.append(mx)
+                label_y.append(my)
+                label_z.append(mz)
+                label_text.append(text)
+
+        traces.append(go.Scatter3d(
+            x=label_x, y=label_y, z=label_z,
+            mode="text",
+            text=label_text,
+            textfont=dict(size=10, color="#555555", family=FONT_FAMILY_BODY),
+            showlegend=False,
+            hoverinfo="skip",
+            name="edge_labels",
+        ))
 
     types_present = sorted(
         set(data.get("type", "unknown") for _, data in G.nodes(data=True)),
