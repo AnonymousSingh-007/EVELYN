@@ -44,6 +44,38 @@ TRIM_PRIORITY = ["co_host", "cert_peer", "subdomain"]
 MAX_PER_TRIMMED_TYPE = {"cert_peer": 5, "co_host": 3, "subdomain": 8}
 
 
+def _looks_like_real_domain(value: str) -> bool:
+    """
+    Defensive filter: returns False for values that are clearly error
+    messages or status strings rather than real domain names, which
+    can leak into our graph through any module that returns a LIST
+    of discovered domains (check_shared_hosting, fetch_subdomains,
+    fetch_cert) if that module's error path puts a message string
+    inside the list instead of cleanly setting resolved=False.
+
+    A real domain: no whitespace, contains at least one dot, doesn't
+    start with a capital letter followed by lowercase letters (which
+    is how almost every English-sentence error message starts: "No
+    DNS...", "Failed to...", "Rate limit..."), and isn't absurdly long.
+    """
+    if not value or not isinstance(value, str):
+        return False
+    if " " in value:
+        return False   # domains never contain spaces; sentences do
+    if "." not in value:
+        return False   # not a valid domain shape at all
+    if len(value) > 100:
+        return False   # error messages tend to run long; domains don't
+    # Catches "No DNS...", "Failed...", "Rate limit...", "Error..." —
+    # capital letter followed by lowercase is an English-sentence
+    # pattern, never a real domain (domains are case-insensitive and
+    # essentially always written lowercase in practice/by our own
+    # pipeline's normalization).
+    if value[0].isupper() and len(value) > 1 and value[1].islower():
+        return False
+    return True
+
+
 def build_graph(url: str,
                 label: int = None,
                 verbose: bool = True,
@@ -133,6 +165,10 @@ def build_graph(url: str,
     cert = fetch_cert(domain)
     if cert["resolved"]:
         for peer in cert["shared_domains"]:
+            if not _looks_like_real_domain(peer):
+                if verbose:
+                    print(f"  ⚠ Discarded non-domain value from cert peers: '{peer}'")
+                continue
             G.add_node(peer, type="cert_peer")
             G.add_edge(domain, peer, relation="shares-cert", weight=1.0)
         G.nodes[domain]["cert_count"] = cert["cert_count"]
@@ -192,6 +228,10 @@ def build_graph(url: str,
     subdomains = fetch_subdomains(domain)
     if subdomains["resolved"] and subdomains["count"] > 0:
         for sub in subdomains["subdomains"]:
+            if not _looks_like_real_domain(sub):
+                if verbose:
+                    print(f"  ⚠ Discarded non-domain value from subdomains: '{sub}'")
+                continue
             G.add_node(sub, type="subdomain")
             G.add_edge(domain, sub, relation="has-subdomain", weight=1.0)
         modules_succeeded.append("subdomains")
@@ -263,6 +303,26 @@ def build_graph(url: str,
         if shared["resolved"]:
             MAX_CO_HOST = 15
             for co in shared["co_hosted_domains"][:MAX_CO_HOST]:
+                # GUARD: check_shared_hosting() can return error/status
+                # MESSAGES inside the co_hosted_domains list itself on
+                # certain failure paths (e.g. "No DNS A records found",
+                # or a rate-limit notice from the reverse-IP API) rather
+                # than raising or setting resolved=False cleanly. If we
+                # don't filter these out HERE, they get silently wired
+                # into the graph as if they were real co-hosted domains
+                # — which then corrupts the Hamiltonian, the eigenvalue
+                # spectrum, and the fingerprint with a phantom node that
+                # represents an error message, not infrastructure.
+                #
+                # A real domain: contains a dot, no spaces, reasonable
+                # length, doesn't start with a capital letter followed
+                # by lowercase (which catches most English-sentence
+                # error messages like "No DNS A records found").
+                if not _looks_like_real_domain(co):
+                    if verbose:
+                        print(f"  ⚠ Discarded non-domain value from shared-hosting "
+                              f"result: '{co}' (likely an error message, not infrastructure)")
+                    continue
                 G.add_node(co, type="co_host")
                 G.add_edge(ip, co, relation="also-hosts", weight=0.5)
             if "shared" not in modules_succeeded:
