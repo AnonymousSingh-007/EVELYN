@@ -320,8 +320,9 @@ def build_graph(url: str,
                 # error messages like "No DNS A records found").
                 if not _looks_like_real_domain(co):
                     if verbose:
+                        preview = co[:60] + ("..." if len(co) > 60 else "")
                         print(f"  ⚠ Discarded non-domain value from shared-hosting "
-                              f"result: '{co}' (likely an error message, not infrastructure)")
+                              f"result: '{preview}' (likely an error message, not infrastructure)")
                     continue
                 G.add_node(co, type="co_host")
                 G.add_edge(ip, co, relation="also-hosts", weight=0.5)
@@ -329,7 +330,20 @@ def build_graph(url: str,
                 modules_succeeded.append("shared")
         else:
             if "shared" not in modules_failed:
-                modules_failed.append(f"shared:{shared.get('error')}")
+                # GUARD: some upstream APIs (e.g. HackerTarget's reverse-IP
+                # lookup when rate-limited) return error bodies that can be
+                # THOUSANDS of lines long — in one observed case, a rate-
+                # limit response was a multi-thousand-line dump of unrelated
+                # domain names formatted to look like real data, not a clean
+                # error string. Without truncating here, a single rate-
+                # limited API call can turn one row of a batch CSV into a
+                # multi-megabyte blob and flood terminal output during
+                # verbose runs. We cap any logged error message at 200
+                # characters — enough to identify the failure, never
+                # enough to carry a payload.
+                raw_error = str(shared.get("error", ""))
+                truncated_error = raw_error[:200] + ("...[truncated]" if len(raw_error) > 200 else "")
+                modules_failed.append(f"shared:{truncated_error}")
 
     # ── Enforce hard node budget ────────────────────────────────────────
     if G.number_of_nodes() > MAX_NODES:
