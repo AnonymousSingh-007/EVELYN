@@ -122,7 +122,181 @@ def generate_all_stage_figures(domain_or_url: str, label: int = None,
     return paths
 
 
-def _save(fig, name: str) -> str:
+def generate_comparison_figures(domain_a_url: str, label_a: int,
+                                 domain_b_url: str, label_b: int,
+                                 verbose: bool = True) -> dict:
+    """
+    THE figure set that actually tells your research story: runs TWO
+    domains through the pipeline and produces side-by-side comparison
+    figures for the Hamiltonian spectrum and the fingerprint — because
+    a single graph's spectrum or fingerprint means little in isolation;
+    what matters is the CONTRAST between a phishing graph and a benign
+    one. This directly addresses the "figures B/C/D are uninformative"
+    problem: nothing in a single bar chart says "different from what?"
+    Putting two side by side does.
+    """
+    if verbose:
+        print(f"\n  [stage_figures] Comparison: {domain_a_url}  vs  {domain_b_url}")
+
+    G_a = build_graph(domain_a_url, label=label_a, verbose=verbose, save=True)
+    G_b = build_graph(domain_b_url, label=label_b, verbose=verbose, save=True)
+
+    if G_a.number_of_nodes() == 0 or G_b.number_of_nodes() == 0:
+        if verbose:
+            print("  ⚠ One or both graphs empty — cannot compare")
+        return {}
+
+    name_a = G_a.graph.get("domain", "unknown").replace(".", "_")
+    name_b = G_b.graph.get("domain", "unknown").replace(".", "_")
+
+    ham_a = build_hamiltonian(G_a, weighted=True, variant="adjacency")
+    ham_b = build_hamiltonian(G_b, weighted=True, variant="adjacency")
+    fp_a = extract_fingerprint(G_a, method="combined")
+    fp_b = extract_fingerprint(G_b, method="combined")
+
+    paths = {}
+    paths["graph_a"] = _figure_hypergraph(G_a, name_a, label_a)
+    paths["graph_b"] = _figure_hypergraph(G_b, name_b, label_b)
+    paths["spectrum_compare"] = _figure_spectrum_comparison(ham_a, ham_b, name_a, name_b, label_a, label_b)
+    paths["fingerprint_compare"] = _figure_fingerprint_comparison(fp_a, fp_b, name_a, name_b, label_a, label_b)
+    paths["distance_summary"] = _figure_distance_summary(fp_a, fp_b, G_a, G_b, name_a, name_b, label_a, label_b)
+
+    if verbose:
+        print(f"\n  ✓ Generated comparison figures:")
+        for name, p in paths.items():
+            print(f"      {name}: {p}")
+
+    return paths
+
+
+def _figure_spectrum_comparison(ham_a: dict, ham_b: dict, name_a: str, name_b: str,
+                                  label_a, label_b) -> str:
+    """
+    Two eigenvalue spectra plotted on the SAME axes, directly overlaid.
+    This is the fix for Figure C: a single spectrum tells you nothing
+    without something to compare it against. Seeing a phishing
+    spectrum's shape next to a benign one's — same axes, same scale —
+    is what actually communicates "these are structurally different."
+    """
+    eig_a = np.sort(ham_a["eigenvalues"])
+    eig_b = np.sort(ham_b["eigenvalues"])
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+
+    # Normalize x-axis to [0,1] by RANK PERCENTILE rather than raw index,
+    # since the two graphs almost certainly have different node counts —
+    # this lets us compare SHAPE of the spectrum, not just raw position.
+    x_a = np.linspace(0, 1, len(eig_a))
+    x_b = np.linspace(0, 1, len(eig_b))
+
+    color_a = "#C0392B" if label_a == 1 else "#2E6E9E"
+    color_b = "#C0392B" if label_b == 1 else "#2E6E9E"
+    tag_a = "PHISHING" if label_a == 1 else "benign" if label_a == 0 else "?"
+    tag_b = "PHISHING" if label_b == 1 else "benign" if label_b == 0 else "?"
+
+    ax.plot(x_a, eig_a, "o-", color=color_a, markersize=5, linewidth=1.5,
+            label=f"{name_a}  [{tag_a}]  (n={len(eig_a)})")
+    ax.plot(x_b, eig_b, "s--", color=color_b, markersize=5, linewidth=1.5,
+            label=f"{name_b}  [{tag_b}]  (n={len(eig_b)})")
+    ax.axhline(0, color="#888780", linewidth=0.6, linestyle=":")
+
+    ax.set_xlabel("Position in spectrum (0 = smallest eigenvalue, 1 = largest)", fontsize=10)
+    ax.set_ylabel("Eigenvalue of H", fontsize=10)
+    ax.set_title("Hamiltonian spectrum shape — overlaid for direct comparison\n"
+                 "Different shapes here = different infrastructure topology",
+                 fontsize=11)
+    ax.legend(loc="best", fontsize=9, frameon=False)
+
+    fig.tight_layout()
+    return _save(fig, f"stageC_spectrum_compare_{name_a}_vs_{name_b}")
+
+
+def _figure_fingerprint_comparison(fp_a: dict, fp_b: dict, name_a: str, name_b: str,
+                                     label_a, label_b) -> str:
+    """
+    Two fingerprints as GROUPED bars (side by side per dimension) rather
+    than two separate charts — this is the fix for Figure D: the actual
+    research question is "how different are these two vectors," and a
+    grouped bar chart makes the gaps between bars the visual story,
+    instead of asking the reader to mentally diff two separate images.
+    """
+    phi_a, phi_b = fp_a["phi"], fp_b["phi"]
+    n = min(len(phi_a), len(phi_b))   # guard against mismatched lengths
+    phi_a, phi_b = phi_a[:n], phi_b[:n]
+
+    color_a = "#C0392B" if label_a == 1 else "#2E6E9E"
+    color_b = "#C0392B" if label_b == 1 else "#2E6E9E"
+    tag_a = "PHISHING" if label_a == 1 else "benign" if label_a == 0 else "?"
+    tag_b = "PHISHING" if label_b == 1 else "benign" if label_b == 0 else "?"
+
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    x = np.arange(n)
+    width = 0.4
+    ax.bar(x - width/2, phi_a, width, color=color_a, alpha=0.85, label=f"{name_a} [{tag_a}]")
+    ax.bar(x + width/2, phi_b, width, color=color_b, alpha=0.85, label=f"{name_b} [{tag_b}]")
+
+    cosine_dist = 1.0 - float(np.dot(phi_a, phi_b) /
+                              ((np.linalg.norm(phi_a) + 1e-12) * (np.linalg.norm(phi_b) + 1e-12)))
+
+    ax.set_xlabel("Fingerprint dimension", fontsize=10)
+    ax.set_ylabel("Value", fontsize=10)
+    ax.set_title(f"φ(G) fingerprint comparison — cosine distance = {cosine_dist:.4f}\n"
+                 f"Larger gaps between bars = more structurally distinct",
+                 fontsize=11)
+    ax.legend(loc="upper right", fontsize=9, frameon=False)
+
+    fig.tight_layout()
+    return _save(fig, f"stageD_fingerprint_compare_{name_a}_vs_{name_b}")
+
+
+def _figure_distance_summary(fp_a: dict, fp_b: dict, G_a, G_b, name_a: str, name_b: str,
+                               label_a, label_b) -> str:
+    """
+    A single, plain-language summary card: the actual cosine distance,
+    rendered as a simple gauge/scale rather than a chart — this is the
+    figure a non-technical reader (or a paper's abstract figure) needs:
+    one number, one sentence, no decoding required.
+    """
+    from src.quantum.gnn_baseline import graphsage_embed, embedding_distance
+
+    phi_a, phi_b = fp_a["phi"], fp_b["phi"]
+    quantum_dist = 1.0 - float(np.dot(phi_a, phi_b) /
+                               ((np.linalg.norm(phi_a) + 1e-12) * (np.linalg.norm(phi_b) + 1e-12)))
+
+    emb_a = graphsage_embed(G_a, seed=1)["graph_embedding"]
+    emb_b = graphsage_embed(G_b, seed=1)["graph_embedding"]
+    gnn_dist = embedding_distance(emb_a, emb_b, metric="cosine")
+
+    fig, ax = plt.subplots(figsize=(8, 3))
+    ax.axis("off")
+
+    tag_a = "PHISHING" if label_a == 1 else "benign" if label_a == 0 else "?"
+    tag_b = "PHISHING" if label_b == 1 else "benign" if label_b == 0 else "?"
+
+    ax.text(0.5, 0.92, f"{name_a} [{tag_a}]   vs   {name_b} [{tag_b}]",
+            ha="center", fontsize=13, fontweight="bold", transform=ax.transAxes)
+
+    # Two horizontal "distance gauges" — visual scale from 0 (identical)
+    # to a reasonable max (0.5) for cosine distance in this context.
+    max_scale = 0.5
+    for i, (label_text, dist, color) in enumerate([
+        ("Quantum walk φ(G)", quantum_dist, "#BA7517"),
+        ("GraphSAGE baseline", gnn_dist, "#3F70AC"),
+    ]):
+        y = 0.6 - i * 0.35
+        ax.add_patch(plt.Rectangle((0.05, y - 0.06), 0.9, 0.12, transform=ax.transAxes,
+                                    facecolor="#eeeeee", edgecolor="#cccccc"))
+        fill_width = min(abs(dist) / max_scale, 1.0) * 0.9
+        ax.add_patch(plt.Rectangle((0.05, y - 0.06), fill_width, 0.12, transform=ax.transAxes,
+                                    facecolor=color))
+        ax.text(0.05, y + 0.10, f"{label_text}:  distance = {dist:.4f}",
+                fontsize=10, transform=ax.transAxes)
+
+    fig.tight_layout()
+    return _save(fig, f"summary_distance_{name_a}_vs_{name_b}")
+
+
+
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     png_path = FIGURES_DIR / f"{name}.png"
     pdf_path = FIGURES_DIR / f"{name}.pdf"
@@ -313,11 +487,21 @@ def _figure_fingerprint_bars(fp: dict, domain: str, label) -> str:
 if __name__ == "__main__":
     import sys
 
-    target = sys.argv[1] if len(sys.argv) > 1 else "https://github.com"
-    label = int(sys.argv[2]) if len(sys.argv) > 2 else None
+    if len(sys.argv) >= 5 and sys.argv[3] not in ("0", "1"):
+        # Fallback won't trigger normally; kept simple on purpose.
+        pass
 
-    print("\n" + "=" * 58)
-    print("  EVELYN — stage_figures()")
-    print("=" * 58)
-
-    paths = generate_all_stage_figures(target, label=label, verbose=True)
+    if len(sys.argv) >= 5:
+        # Comparison mode: domain_a label_a domain_b label_b
+        domain_a, label_a, domain_b, label_b = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+        print("\n" + "=" * 58)
+        print("  EVELYN — stage_figures() COMPARISON mode")
+        print("=" * 58)
+        generate_comparison_figures(domain_a, label_a, domain_b, label_b, verbose=True)
+    else:
+        target = sys.argv[1] if len(sys.argv) > 1 else "https://github.com"
+        label = int(sys.argv[2]) if len(sys.argv) > 2 else None
+        print("\n" + "=" * 58)
+        print("  EVELYN — stage_figures()  (single-domain mode)")
+        print("=" * 58)
+        generate_all_stage_figures(target, label=label, verbose=True)
