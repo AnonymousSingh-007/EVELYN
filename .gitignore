@@ -1,10 +1,32 @@
-# Data (never commit raw phishing data to public repo)
+# EVELYN — .gitignore
+# Public repo: never commit raw phishing/WHOIS/security data, saved
+# graph objects, or anything containing live infrastructure details
+# scraped during research. Figures (PNG/JPG/PDF) ARE committed —
+# they're the evidence/output, not the raw data.
+
+# ── Raw and processed research data ──────────────────────
+# PhishTank/Tranco CSVs, WHOIS dumps, cert cache, checkpoints —
+# never published, since this is scraped third-party + live
+# infrastructure data, not original content.
 data/raw/*
 data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
-# Python
+# ── Saved graph objects ───────────────────────────────────
+# .pkl files are serialized NetworkX graphs containing real domain
+# names, IPs, WHOIS records, and other live infrastructure detail
+# pulled during investigation. These never go into a public repo —
+# only the FIGURES generated from them (which present the findings,
+# not the raw scraped data) are committed.
+data/graphs/*.pkl
+data/graphs/*.gpickle
+!data/graphs/.gitkeep
+
+# ── Certificate transparency cache ────────────────────────
+data/processed/cert_cache/
+
+# ── Python ─────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
@@ -12,12 +34,24 @@ __pycache__/
 venv/
 .venv/
 
-# VS Code
+# ── Editors ────────────────────────────────────────────────
 .vscode/
+.idea/
 
-# Jupyter
+# ── Jupyter ────────────────────────────────────────────────
 .ipynb_checkpoints/
 
-# Results (large files)
-results/figures/*.png
+# ── Results — figures ARE committed (this is the published evidence) ──
+# Only exclude scratch/demo figures and oversized raw metric dumps.
+results/figures/_demo_*
 results/metrics/*.csv
+!results/metrics/.gitkeep
+
+# ── 3D interactive HTML exports ────────────────────────────
+# Self-contained but can be large with embedded plotly.js; keep
+# locally for exploration, don't bloat the public repo with these.
+results/figures/*.html
+
+# ── OS noise ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
