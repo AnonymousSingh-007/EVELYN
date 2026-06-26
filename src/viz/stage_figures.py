@@ -46,6 +46,29 @@ from src.quantum.fingerprint import extract_fingerprint
 
 FIGURES_DIR = Path("results/figures")
 
+
+def _save(fig, name: str) -> str:
+    """
+    Saves a matplotlib figure as both PNG (300dpi, for quick viewing)
+    and PDF (vector, for LaTeX/print) into results/figures/. Returns
+    the PNG path as the canonical "here's where it went" reference.
+
+    This function was previously missing from the module entirely —
+    an editing mistake during an earlier patch dropped its definition
+    while keeping every call site intact, which is exactly the kind
+    of bug Python's lazy function-body execution lets slip through
+    until the function is actually invoked at runtime, not at import
+    time. Defining it here, immediately after FIGURES_DIR, guarantees
+    it exists before any of the _figure_* functions below can call it.
+    """
+    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    png_path = FIGURES_DIR / f"{name}.png"
+    pdf_path = FIGURES_DIR / f"{name}.pdf"
+    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    fig.savefig(pdf_path, bbox_inches="tight")
+    plt.close(fig)
+    return str(png_path)
+
 plt.rcParams.update({
     "font.family":       "serif",
     "font.size":         10,
