@@ -161,8 +161,15 @@ def evaluate_edge_recovery(G_full: nx.Graph, hide_fraction: float = 0.2,
 def _print_candidates(candidates: list) -> None:
     print(f"\n  Top {len(candidates)} estimated missing edges:")
     for c in candidates:
-        print(f"    {c['node_a']:30s} [{c['type_a']:10s}]  <-->  "
-              f"{c['node_b']:30s} [{c['type_b']:10s}]   score={c['score']:.5f}")
+        # GUARD: node labels can be integers (e.g. nx.complete_graph(5)
+        # labels nodes 0,1,2,3,4) or strings (real pipeline graphs use
+        # domain names, IPs, etc). str() coercion here makes this print
+        # function work correctly regardless of which kind of graph
+        # it's handed — synthetic test graphs and real ones alike.
+        node_a_str = str(c["node_a"])
+        node_b_str = str(c["node_b"])
+        print(f"    {node_a_str:30s} [{c['type_a']:10s}]  <-->  "
+              f"{node_b_str:30s} [{c['type_b']:10s}]   score={c['score']:.5f}")
     print(f"  {'─'*52}")
 
 
