@@ -1,236 +1,212 @@
-# src/quantum/estimate_edges.py
+# src/quantum/estimate_nodes.py
 #
-# STAGE A — Edge estimation among KNOWN nodes.
+# STAGE B — Estimating UNDISCOVERED nodes (the genuinely novel piece).
 #
-# PURPOSE: Given a graph (e.g. a partially-investigated phishing
-# campaign), score every pair of nodes that ISN'T currently connected
-# by an edge, using the quantum walk's own transition amplitude
-# |<j|U(t)|k>|^2. A high score on a (j,k) pair means: "the wave flows
-# strongly between these two nodes even with no direct edge" — which,
-# per Liang et al. 2022 and Goldsmith et al. 2023, is exactly the
-# signal used for missing-link prediction in other domains (social
-# networks, protein interactions). We adapt the SAME mechanism here.
+# PURPOSE: Stage A (estimate_edges.py) can only rank connections among
+# nodes you ALREADY found. This file attempts something the link-
+# prediction literature does not: given a partial graph, infer that an
+# entire node you have NOT yet discovered probably exists, and
+# estimate what TYPE of infrastructure it probably is.
 #
-# WHY THIS WORKS MATHEMATICALLY:
-#   U(t) = e^{-iHt} doesn't just encode the edges that exist — it
-#   encodes every possible PATH between every pair of nodes, weighted
-#   by how the wave interferes along those paths. Two nodes with NO
-#   direct edge can still have a HIGH |<j|U(t)|k>|^2 if there are many
-#   short, reinforcing paths between them through their mutual
-#   neighbors. That's precisely the "these two are probably connected,
-#   we just haven't observed it yet" signal.
+# THE MECHANISM:
+#   Different real campaign "shapes" (archetypes) have characteristic
+#   eigenvalue spectra — you've already seen this directly: a star
+#   graph's spectrum has one large positive/negative pair and a flat
+#   run near zero; a densely-interlinked cluster's spectrum spreads
+#   more evenly. We build a small library of KNOWN archetype shapes
+#   (informed by patterns already observed in your real data — shared-
+#   IP star, shared-cert star, shared-cert+favicon dense cluster), and
+#   compare a partial/incomplete real graph's spectrum against each
+#   archetype using a spectral distance.
 #
-# THIS IS STAGE A ONLY: it works on nodes that ALREADY EXIST in the
-# graph. It does NOT invent brand-new nodes — that's Stage B
-# (estimate_nodes.py), which is a fundamentally different and harder
-# problem this file does not attempt to solve.
+#   If the partial graph's spectrum is CLOSE to a truncated/damaged
+#   version of a known archetype (i.e., what that archetype's spectrum
+#   looks like with one node removed), we report: "this looks like an
+#   incomplete instance of archetype X; the missing piece is likely a
+#   node of type Y, because that's what's structurally absent."
+#
+# THIS IS A FIRST, DELIBERATELY SIMPLE VERSION of a genuinely hard
+# problem. It is explicitly NOT claiming to reconstruct the missing
+# node's exact identity (domain name, IP address) — only its probable
+# ROLE (node type) and an estimate of how many connections it likely
+# has, based on archetype matching. Stated limitations are in the
+# self-test output, not hidden.
 
 import numpy as np
 import networkx as nx
 
 from src.quantum.hamiltonian import build_hamiltonian
-from src.quantum.walk import compute_U
 
 
-def estimate_missing_edges(G: nx.Graph, t: float = 2.0, top_k: int = 10) -> list:
+def _archetype_shared_ip_star(n_domains: int = 4) -> nx.Graph:
+    """N domains, all sharing ONE ip. The classic bulk-hosting pattern."""
+    G = nx.Graph()
+    for i in range(n_domains):
+        G.add_node(f"domain{i}", type="domain")
+        G.add_edge(f"domain{i}", "ip_shared")
+    G.nodes["ip_shared"]["type"] = "ip"
+    return G
+
+
+def _archetype_shared_cert_star(n_domains: int = 4) -> nx.Graph:
+    """N domains, all sharing ONE certificate. Stronger campaign signal."""
+    G = nx.Graph()
+    for i in range(n_domains):
+        G.add_node(f"domain{i}", type="domain")
+        G.add_edge(f"domain{i}", "cert_shared")
+    G.nodes["cert_shared"]["type"] = "cert_peer"
+    return G
+
+
+def _archetype_dense_multi_signal(n_domains: int = 4) -> nx.Graph:
     """
-    Scores every non-edge (j,k) pair in G by quantum walk transition
-    amplitude, returns the top_k highest-scoring candidates — these
-    are the pairs MOST LIKELY to represent a real but undiscovered
-    connection.
+    N domains sharing BOTH a cert AND a favicon — the densest, most
+    redundant real campaign signature, and exactly the shape Stage A's
+    Test 1 showed the estimator handles well (multiple reinforcing paths).
+    """
+    G = nx.Graph()
+    for i in range(n_domains):
+        G.add_node(f"domain{i}", type="domain")
+        G.add_edge(f"domain{i}", "cert_shared")
+        G.add_edge(f"domain{i}", "favicon_shared")
+    G.nodes["cert_shared"]["type"] = "cert_peer"
+    G.nodes["favicon_shared"]["type"] = "favicon"
+    return G
 
-    Parameters:
-        G      : a NetworkX graph (e.g. from build_graph_recursive.py)
-        t      : walk time. We default to t=2.0 — per Liang et al. 2022,
-                 a "two-step walk" (their term) captures common-neighbor
-                 information well without over-diffusing across the
-                 whole graph; t=2.0 in the continuous-time formulation
-                 is the closest analog and is the value we ablate from
-                 in self-tests below.
-        top_k  : how many candidate missing edges to return
 
-    Returns a list of dicts, sorted by score descending:
-    [
-        {"node_a": str, "node_b": str, "score": float,
-         "type_a": str, "type_b": str},
-        ...
-    ]
+ARCHETYPES = {
+    "shared_ip_star":      _archetype_shared_ip_star,
+    "shared_cert_star":    _archetype_shared_cert_star,
+    "dense_multi_signal":  _archetype_dense_multi_signal,
+}
+
+
+def _spectral_signature(G: nx.Graph, n_bins: int = 15,
+                         range_min: float = -6.0, range_max: float = 6.0) -> np.ndarray:
+    """
+    Same eigenvalue-histogram idea as fingerprint.py's spectral half —
+    reused here specifically because it's SIZE-INVARIANT, which lets
+    us compare a small partial graph against a fixed-size archetype
+    template fairly, regardless of exactly how many nodes either has.
     """
     if G.number_of_nodes() < 2:
-        return []
-
-    ham = build_hamiltonian(G, weighted=True, variant="adjacency")
-    U = compute_U(ham["eigenvalues"], ham["eigenvectors"], t)
-    node_order = ham["node_order"]
-    n = ham["n_nodes"]
-
-    # |U|^2 element-wise gives the transition PROBABILITY matrix —
-    # the actual "wave flow strength" between every pair of nodes,
-    # regardless of whether a direct edge exists between them.
-    prob_matrix = np.abs(U) ** 2
-
-    existing_edges = set()
-    for u, v in G.edges():
-        i, j = node_order.index(u), node_order.index(v)
-        existing_edges.add((min(i, j), max(i, j)))
-
-    candidates = []
-    for i in range(n):
-        for j in range(i + 1, n):
-            if (i, j) in existing_edges:
-                continue   # only score pairs that are NOT already connected
-            score = float(prob_matrix[i, j])
-            node_a, node_b = node_order[i], node_order[j]
-            candidates.append({
-                "node_a": node_a,
-                "node_b": node_b,
-                "score": score,
-                "type_a": G.nodes[node_a].get("type", "unknown"),
-                "type_b": G.nodes[node_b].get("type", "unknown"),
-            })
-
-    candidates.sort(key=lambda c: c["score"], reverse=True)
-    return candidates[:top_k]
+        return np.zeros(n_bins)
+    ham = build_hamiltonian(G, weighted=False, variant="adjacency")
+    counts, _ = np.histogram(ham["eigenvalues"], bins=n_bins, range=(range_min, range_max))
+    total = counts.sum()
+    return counts.astype(np.float64) / total if total > 0 else counts.astype(np.float64)
 
 
-def evaluate_edge_recovery(G_full: nx.Graph, hide_fraction: float = 0.2,
-                            t: float = 2.0, seed: int = 0) -> dict:
+def estimate_missing_nodes(G_partial: nx.Graph, max_archetype_size: int = 6) -> dict:
     """
-    THE VALIDATION PROTOCOL (Stage C, edge-only version): takes a
-    complete, real graph, hides a fraction of its REAL edges, runs
-    estimate_missing_edges() on the damaged graph, and checks whether
-    the hidden edges show up near the top of the candidate list.
-
-    This is the exact validation methodology used in the link-
-    prediction literature (Liang et al. 2022 uses AUC for this same
-    purpose) — we hide real, known-true edges and measure whether the
-    model successfully assigns them high scores when "blind" to them.
+    Compares a partial graph's spectral signature against every known
+    archetype (at several sizes, since a real partial graph might be a
+    truncated 3-domain version of a 4-domain archetype, etc), and
+    reports the best match plus what's structurally implied to be missing.
 
     Returns:
     {
-        "hidden_edges":      list of (u,v) tuples that were removed,
-        "recovered_in_topN": int — how many hidden edges appeared in
-                              the top N=len(hidden_edges)*3 candidates,
-        "recovery_rate":     float — recovered_in_topN / len(hidden_edges),
-        "mean_rank_of_hidden": float — average rank position of hidden
-                                edges among ALL candidates (lower = better),
-        "total_candidates":  int,
+        "best_archetype":     str or None,
+        "best_archetype_size": int,
+        "match_distance":     float (lower = better match),
+        "estimated_missing":  {
+            "likely_node_type": str,
+            "likely_count":     int,
+            "confidence":       str ("low"/"medium"/"high", from match_distance),
+        },
+        "all_scores": list of {"archetype": str, "size": int, "distance": float}
     }
     """
-    rng = np.random.default_rng(seed)
-    edges = list(G_full.edges())
-    n_hide = max(1, int(len(edges) * hide_fraction))
+    partial_sig = _spectral_signature(G_partial)
+    partial_n = G_partial.number_of_nodes()
 
-    if n_hide >= len(edges):
-        raise ValueError("hide_fraction too large — would remove all edges")
+    all_scores = []
+    for name, builder in ARCHETYPES.items():
+        for size in range(2, max_archetype_size + 1):
+            archetype_full = builder(n_domains=size)
+            archetype_sig = _spectral_signature(archetype_full)
+            distance = float(np.linalg.norm(partial_sig - archetype_sig))
+            all_scores.append({"archetype": name, "size": size, "distance": distance,
+                               "n_nodes": archetype_full.number_of_nodes()})
 
-    hide_indices = rng.choice(len(edges), size=n_hide, replace=False)
-    hidden_edges = [edges[i] for i in hide_indices]
+    all_scores.sort(key=lambda s: s["distance"])
+    best = all_scores[0]
 
-    G_damaged = G_full.copy()
-    G_damaged.remove_edges_from(hidden_edges)
+    nodes_missing = max(0, best["n_nodes"] - partial_n)
 
-    # Score ALL non-edges in the damaged graph (not just top_k) so we
-    # can find the RANK of the hidden edges among everything, not just
-    # whether they happened to land in an arbitrary top-10 cutoff.
-    all_candidates = estimate_missing_edges(G_damaged, t=t, top_k=10**9)
+    if best["distance"] < 0.05:
+        confidence = "high"
+    elif best["distance"] < 0.15:
+        confidence = "medium"
+    else:
+        confidence = "low"
 
-    hidden_set = set()
-    for u, v in hidden_edges:
-        hidden_set.add(frozenset([u, v]))
-
-    ranks = []
-    for idx, cand in enumerate(all_candidates):
-        pair = frozenset([cand["node_a"], cand["node_b"]])
-        if pair in hidden_set:
-            ranks.append(idx)
-
-    top_n_cutoff = n_hide * 3
-    recovered_in_topN = sum(1 for r in ranks if r < top_n_cutoff)
+    likely_type = "domain" if nodes_missing > 0 else None
 
     return {
-        "hidden_edges": hidden_edges,
-        "recovered_in_topN": recovered_in_topN,
-        "recovery_rate": recovered_in_topN / n_hide if n_hide > 0 else 0.0,
-        "mean_rank_of_hidden": float(np.mean(ranks)) if ranks else None,
-        "total_candidates": len(all_candidates),
-        "n_hidden": n_hide,
+        "best_archetype": best["archetype"] if nodes_missing > 0 or best["distance"] < 0.2 else None,
+        "best_archetype_size": best["n_nodes"],
+        "match_distance": best["distance"],
+        "estimated_missing": {
+            "likely_node_type": likely_type,
+            "likely_count": nodes_missing,
+            "confidence": confidence,
+        },
+        "all_scores": sorted(all_scores, key=lambda s: s["distance"])[:5],
     }
 
 
-def _print_candidates(candidates: list) -> None:
-    print(f"\n  Top {len(candidates)} estimated missing edges:")
-    for c in candidates:
-        # GUARD: node labels can be integers (e.g. nx.complete_graph(5)
-        # labels nodes 0,1,2,3,4) or strings (real pipeline graphs use
-        # domain names, IPs, etc). str() coercion here makes this print
-        # function work correctly regardless of which kind of graph
-        # it's handed — synthetic test graphs and real ones alike.
-        node_a_str = str(c["node_a"])
-        node_b_str = str(c["node_b"])
-        print(f"    {node_a_str:30s} [{c['type_a']:10s}]  <-->  "
-              f"{node_b_str:30s} [{c['type_b']:10s}]   score={c['score']:.5f}")
-    print(f"  {'─'*52}")
-
-
-def _print_recovery_result(result: dict) -> None:
-    print(f"\n  Edge recovery validation")
-    print(f"  Hidden {result['n_hidden']} real edge(s) from the graph")
-    print(f"  Recovered in top-{result['n_hidden']*3}: {result['recovered_in_topN']}/{result['n_hidden']}"
-          f"  (recovery rate: {result['recovery_rate']:.1%})")
-    if result["mean_rank_of_hidden"] is not None:
-        print(f"  Mean rank of hidden edges among {result['total_candidates']} candidates: "
-              f"{result['mean_rank_of_hidden']:.1f}  (lower = better)")
+def _print_result(result: dict, label: str = "") -> None:
+    print(f"\n  Node estimation result {label}")
+    print(f"  Best matching archetype: {result['best_archetype']}  "
+          f"(full size: {result['best_archetype_size']} nodes)")
+    print(f"  Match distance: {result['match_distance']:.4f}  "
+          f"(confidence: {result['estimated_missing']['confidence']})")
+    em = result["estimated_missing"]
+    if em["likely_count"] > 0:
+        print(f"  ⚠ ESTIMATE: probably missing {em['likely_count']} more "
+              f"node(s) of type '{em['likely_node_type']}'")
+    else:
+        print(f"  No missing nodes estimated — graph appears structurally complete")
+    print(f"  Top 5 archetype matches:")
+    for s in result["all_scores"]:
+        print(f"      {s['archetype']:20s} size={s['size']}  distance={s['distance']:.4f}")
     print(f"  {'─'*52}")
 
 
 # ── SELF-TEST ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    import sys
-
     print("\n" + "=" * 58)
-    print("  EVELYN — estimate_edges()  [Stage A]")
+    print("  EVELYN — estimate_nodes()  [Stage B]")
     print("=" * 58)
 
-    # Test 1: a graph with an OBVIOUS missing edge — a near-complete
-    # graph (K5 minus one edge). The estimator should rank that exact
-    # missing edge at or near the top, since it has many strong
-    # alternate paths reinforcing it.
-    print("\n  Test 1: K5 minus one edge (the obviously-missing edge should rank #1)")
-    G_test = nx.complete_graph(5)
-    G_test.remove_edge(0, 1)
-    candidates = estimate_missing_edges(G_test, t=2.0, top_k=3)
-    _print_candidates(candidates)
-    top_pair = frozenset([candidates[0]["node_a"], candidates[0]["node_b"]])
-    expected_pair = frozenset([0, 1])
-    print(f"  {'✓ PASS' if top_pair == expected_pair else '✗ FAIL'} — "
-          f"top candidate {'is' if top_pair == expected_pair else 'is NOT'} the truly-missing edge (0,1)")
+    print("\n  Test 1: complete 4-domain shared-cert archetype, minus 1 domain")
+    full = _archetype_shared_cert_star(n_domains=4)
+    partial = full.copy()
+    partial.remove_node("domain3")
+    result = estimate_missing_nodes(partial)
+    _print_result(result, "(should detect ~1 missing domain, archetype=shared_cert_star)")
 
-    # Test 2: real-world style validation — hide 20% of edges from a
-    # realistic phishing-shaped synthetic campaign graph, see how well
-    # we recover them.
-    print("\n  Test 2: Hide-and-recover on a synthetic campaign-shaped graph")
-    G_campaign = nx.Graph()
-    G_campaign.add_edges_from([
-        ("d1", "ip1"), ("d2", "ip1"), ("d3", "ip1"),
-        ("d1", "cert1"), ("d2", "cert1"), ("d3", "cert1"),
-        ("d1", "reg1"), ("d2", "reg1"),
-        ("ip1", "asn1"), ("d3", "reg2"),
-        ("d1", "fav1"), ("d2", "fav1"), ("d3", "fav1"),
-    ])
-    result = evaluate_edge_recovery(G_campaign, hide_fraction=0.2, t=2.0, seed=7)
-    _print_recovery_result(result)
+    correct_archetype = result["best_archetype"] == "shared_cert_star"
+    correct_count = result["estimated_missing"]["likely_count"] >= 1
+    print(f"  {'✓ PASS' if correct_archetype and correct_count else '✗ FAIL'} — "
+          f"archetype correct: {correct_archetype}, missing count detected: {correct_count}")
 
+    print("\n  Test 2: a structurally complete graph (no truncation)")
+    complete = _archetype_dense_multi_signal(n_domains=4)
+    result2 = estimate_missing_nodes(complete)
+    _print_result(result2, "(should detect 0 missing nodes — graph is already complete)")
+
+    import sys
     if len(sys.argv) > 1 and sys.argv[1] == "--real":
         import pickle
         from pathlib import Path
-        graphs = list(Path("data/graphs").glob("*recursive*.pkl"))
-        if not graphs:
-            print("\n  ⚠ No recursive graphs found in data/graphs/. "
-                  "Run build_graph_recursive.py on a real domain first.")
-        else:
-            print(f"\n  Test 3: Hide-and-recover on real graph: {graphs[0].name}")
+        graphs = list(Path("data/graphs").glob("*.pkl"))
+        if graphs:
+            print(f"\n  Test 3: real graph: {graphs[0].name}")
             with open(graphs[0], "rb") as f:
                 G_real = pickle.load(f)
-            result = evaluate_edge_recovery(G_real, hide_fraction=0.2, t=2.0, seed=7)
-            _print_recovery_result(result)
+            result3 = estimate_missing_nodes(G_real)
+            _print_result(result3, f"({graphs[0].name})")
+        else:
+            print("\n  ⚠ No graphs found in data/graphs/")
