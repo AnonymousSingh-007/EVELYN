@@ -197,3 +197,33 @@ def _figure_fingerprint_bars(fp, domain, label):
     ax.set_title(f"{domain} — φ(G) fingerprint [{label_str}]")
     fig.tight_layout()
     return _save(fig, f"stageD_fingerprint_{domain}")
+
+
+# ── SELF-TEST / CLI ────────────────────────────────────────────────
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) >= 5 and sys.argv[3] not in ("0", "1"):
+        pass
+
+    if len(sys.argv) >= 5:
+        domain_a, label_a = sys.argv[1], int(sys.argv[2])
+        domain_b, label_b = sys.argv[3], int(sys.argv[4])
+        print("\n" + "=" * 58)
+        print("  EVELYN — stage_figures() COMPARISON mode")
+        print("=" * 58)
+        generate_comparison_figures(domain_a, label_a, domain_b, label_b, verbose=True)
+    elif len(sys.argv) >= 2:
+        target = sys.argv[1]
+        label = int(sys.argv[2]) if len(sys.argv) > 2 else None
+        print("\n" + "=" * 58)
+        print("  EVELYN — stage_figures()  (single-domain mode)")
+        print("=" * 58)
+        generate_all_stage_figures(target, label=label, verbose=True)
+    else:
+        print("\n  Usage:")
+        print("    python -m src.viz.stage_figures <URL> [label]")
+        print("    python -m src.viz.stage_figures <URL_A> <label_A> <URL_B> <label_B>")
+        print("\n  Examples:")
+        print("    python -m src.viz.stage_figures https://suspicious.xyz 1")
+        print("    python -m src.viz.stage_figures https://phish.xyz 1 https://google.com 0")
