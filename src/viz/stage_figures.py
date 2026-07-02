@@ -47,27 +47,79 @@ def generate_all_stage_figures(domain_or_url, label=None, verbose=True,
     paths["fingerprint"] = _figure_fingerprint_bars(fp, domain, label)
 
     # Stage E — Edge estimation (the pivot contribution)
-    if include_edge_estimation and G.number_of_edges() >= 6:
+    if include_edge_estimation:
         try:
             from src.quantum.estimate_edges import estimate_missing_edges, evaluate_edge_recovery
             from src.viz.paper_figures import figure_edge_predictions, figure_recovery_comparison
 
-            predictions = estimate_missing_edges(G, top_k=10, filter_by_type=True)
-            if predictions:
-                paths["edge_predictions"] = figure_edge_predictions(
-                    G, predictions, max_show=5,
-                    title=f"{domain} — predicted missing infrastructure [{label}]")
-                if verbose:
-                    print(f"\n  Top 3 predicted missing edges:")
-                    for p in predictions[:3]:
-                        print(f"    → {p['explanation']}")
+            n_nodes = G.number_of_nodes()
+            n_edges = G.number_of_edges()
 
-            if G.number_of_edges() >= 8 and nx.is_connected(G):
-                eval_result = evaluate_edge_recovery(G, hide_fraction=0.2, verbose=verbose)
-                if "quantum_walk" in eval_result:
-                    paths["edge_recovery"] = figure_recovery_comparison(eval_result)
+            if n_nodes < 3:
+                if verbose:
+                    print(f"\n  ⚠ Edge estimation skipped: graph too small "
+                          f"({n_nodes} nodes, need ≥ 3)")
+            else:
+                if verbose:
+                    print(f"\n  ── Stage E: Edge estimation ({n_nodes} nodes, {n_edges} edges) ──")
+
+                predictions = estimate_missing_edges(G, top_k=10, filter_by_type=True)
+
+                if not predictions:
+                    if verbose:
+                        # Count how many type-valid non-edges actually exist
+                        from src.quantum.estimate_edges import _canonical_type_pair
+                        node_types = {n: d.get("type", "unknown") for n, d in G.nodes(data=True)}
+                        valid_pairs = 0
+                        nodes_list = list(G.nodes())
+                        for ii in range(len(nodes_list)):
+                            for jj in range(ii+1, len(nodes_list)):
+                                if G.has_edge(nodes_list[ii], nodes_list[jj]):
+                                    continue
+                                if _canonical_type_pair(node_types[nodes_list[ii]],
+                                                        node_types[nodes_list[jj]]):
+                                    valid_pairs += 1
+                        print(f"  ⚠ No plausible missing edges found")
+                        print(f"    {valid_pairs} type-valid non-edge pairs in this graph")
+                        if valid_pairs == 0:
+                            print(f"    This graph's node types have no unconnected valid pairs.")
+                            print(f"    Edge estimation works best on MULTI-DOMAIN campaign graphs.")
+                            print(f"    Try: python -m src.pipeline.build_graph_recursive <URL> 1")
+                        else:
+                            print(f"    All scored near zero — graph may be fully connected")
+                else:
+                    paths["edge_predictions"] = figure_edge_predictions(
+                        G, predictions, max_show=min(5, len(predictions)),
+                        title=f"{domain} — predicted missing infrastructure "
+                              f"[{'PHISHING' if label==1 else 'BENIGN' if label==0 else '?'}]")
+                    if verbose:
+                        print(f"  {len(predictions)} plausible missing edges found. Top predictions:")
+                        for p in predictions[:5]:
+                            conf = {"high": "🔴", "medium": "🟡", "low": "⚪"}.get(
+                                p.get("confidence", ""), "  ")
+                            print(f"    {conf} {p['explanation']}")
+
+                # Validation needs enough edges to hide some AND keep connectivity
+                if n_edges >= 6 and nx.is_connected(G):
+                    if verbose:
+                        print(f"\n  Running hide-and-recover validation...")
+                    eval_result = evaluate_edge_recovery(
+                        G, hide_fraction=0.2, verbose=verbose)
+                    if "quantum_walk" in eval_result:
+                        paths["edge_recovery"] = figure_recovery_comparison(eval_result)
+                elif verbose:
+                    reasons = []
+                    if n_edges < 6:
+                        reasons.append(f"only {n_edges} edges (need ≥ 6 to hide some)")
+                    if not nx.is_connected(G):
+                        reasons.append("graph is disconnected")
+                    print(f"\n  ⚠ Hide-and-recover validation skipped: {'; '.join(reasons)}")
+
         except Exception as e:
-            if verbose: print(f"  ⚠ Edge estimation figures skipped: {e}")
+            if verbose:
+                print(f"  ⚠ Edge estimation error: {e}")
+                import traceback
+                traceback.print_exc()
 
     if verbose:
         n_figs = len(paths)
