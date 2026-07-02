@@ -41,12 +41,24 @@ def generate_all_stage_figures(domain_or_url, label=None, verbose=True,
     ham = build_hamiltonian(G, weighted=True, variant="adjacency")
     fp = extract_fingerprint(G, method="combined")
     paths = {}
-    paths["graph"] = _figure_hypergraph(G, domain, label)
-    paths["hamiltonian"] = _figure_hamiltonian_heatmap(ham, domain, label)
-    paths["spectrum"] = _figure_eigenvalue_spectrum(ham, domain, label)
-    paths["fingerprint"] = _figure_fingerprint_bars(fp, domain, label)
 
-    # Stage E — Edge estimation (the pivot contribution)
+    # Stage A — Hypergraph (always useful — shows what was collected)
+    paths["graph"] = _figure_hypergraph(G, domain, label)
+
+    # Stage B — Hamiltonian heatmap (useful when graph has 5+ nodes)
+    if G.number_of_nodes() >= 5:
+        paths["hamiltonian"] = _figure_hamiltonian_heatmap(ham, domain, label)
+
+    # Stages C & D — Spectrum and fingerprint are only meaningful in
+    # COMPARISON mode (phishing vs benign side by side). A single graph's
+    # eigenvalue spectrum or bar chart tells you nothing without a reference.
+    # We skip them here and only generate them in generate_comparison_figures().
+    if verbose and G.number_of_nodes() >= 5:
+        print(f"\n  ℹ Spectrum and fingerprint figures skipped for single-domain mode.")
+        print(f"    These are only informative in comparison mode:")
+        print(f"    python -m src.viz.stage_figures <PHISHING_URL> 1 <BENIGN_URL> 0")
+
+    # Stage E — Edge estimation
     if include_edge_estimation:
         try:
             from src.quantum.estimate_edges import estimate_missing_edges, evaluate_edge_recovery
@@ -55,51 +67,51 @@ def generate_all_stage_figures(domain_or_url, label=None, verbose=True,
             n_nodes = G.number_of_nodes()
             n_edges = G.number_of_edges()
 
+            # Count how many DOMAIN-type nodes exist — edge estimation
+            # predicts links between multiple domains sharing infrastructure.
+            # A single-domain ego-graph has all its valid edges by construction.
+            domain_nodes = [n for n, d in G.nodes(data=True) if d.get("type") == "domain"]
+            n_domains = len(domain_nodes)
+
             if n_nodes < 3:
                 if verbose:
-                    print(f"\n  ⚠ Edge estimation skipped: graph too small "
-                          f"({n_nodes} nodes, need ≥ 3)")
+                    print(f"\n  ⚠ Edge estimation skipped: graph too small ({n_nodes} nodes)")
+            elif n_domains < 2:
+                if verbose:
+                    print(f"\n  ── Stage E: Edge estimation ──")
+                    print(f"  ⚠ Only {n_domains} domain node — a single-domain ego-graph is fully")
+                    print(f"    connected by construction (build_graph wires every discovered node).")
+                    print(f"    Edge estimation predicts missing links between MULTIPLE domains")
+                    print(f"    sharing infrastructure. To get predictions:")
+                    print(f"    ")
+                    print(f"    Option 1: Expand recursively to find related domains:")
+                    print(f"      python -m src.pipeline.build_graph_recursive {domain_or_url} {label or 1}")
+                    print(f"    ")
+                    print(f"    Option 2: Run on demo campaign graph (no network needed):")
+                    print(f"      python -m src.viz.paper_figures --edge-demo")
             else:
                 if verbose:
-                    print(f"\n  ── Stage E: Edge estimation ({n_nodes} nodes, {n_edges} edges) ──")
+                    print(f"\n  ── Stage E: Edge estimation ({n_domains} domains, "
+                          f"{n_nodes} nodes, {n_edges} edges) ──")
 
                 predictions = estimate_missing_edges(G, top_k=10, filter_by_type=True)
 
                 if not predictions:
                     if verbose:
-                        # Count how many type-valid non-edges actually exist
-                        from src.quantum.estimate_edges import _canonical_type_pair
-                        node_types = {n: d.get("type", "unknown") for n, d in G.nodes(data=True)}
-                        valid_pairs = 0
-                        nodes_list = list(G.nodes())
-                        for ii in range(len(nodes_list)):
-                            for jj in range(ii+1, len(nodes_list)):
-                                if G.has_edge(nodes_list[ii], nodes_list[jj]):
-                                    continue
-                                if _canonical_type_pair(node_types[nodes_list[ii]],
-                                                        node_types[nodes_list[jj]]):
-                                    valid_pairs += 1
-                        print(f"  ⚠ No plausible missing edges found")
-                        print(f"    {valid_pairs} type-valid non-edge pairs in this graph")
-                        if valid_pairs == 0:
-                            print(f"    This graph's node types have no unconnected valid pairs.")
-                            print(f"    Edge estimation works best on MULTI-DOMAIN campaign graphs.")
-                            print(f"    Try: python -m src.pipeline.build_graph_recursive <URL> 1")
-                        else:
-                            print(f"    All scored near zero — graph may be fully connected")
+                        print(f"  ⚠ No plausible missing edges — all valid type pairs already connected")
                 else:
                     paths["edge_predictions"] = figure_edge_predictions(
                         G, predictions, max_show=min(5, len(predictions)),
                         title=f"{domain} — predicted missing infrastructure "
                               f"[{'PHISHING' if label==1 else 'BENIGN' if label==0 else '?'}]")
                     if verbose:
-                        print(f"  {len(predictions)} plausible missing edges found. Top predictions:")
+                        print(f"  {len(predictions)} plausible missing edges found:")
                         for p in predictions[:5]:
                             conf = {"high": "🔴", "medium": "🟡", "low": "⚪"}.get(
                                 p.get("confidence", ""), "  ")
                             print(f"    {conf} {p['explanation']}")
 
-                # Validation needs enough edges to hide some AND keep connectivity
+                # Hide-and-recover validation
                 if n_edges >= 6 and nx.is_connected(G):
                     if verbose:
                         print(f"\n  Running hide-and-recover validation...")
@@ -107,13 +119,13 @@ def generate_all_stage_figures(domain_or_url, label=None, verbose=True,
                         G, hide_fraction=0.2, verbose=verbose)
                     if "quantum_walk" in eval_result:
                         paths["edge_recovery"] = figure_recovery_comparison(eval_result)
-                elif verbose:
+                elif verbose and predictions:
                     reasons = []
                     if n_edges < 6:
-                        reasons.append(f"only {n_edges} edges (need ≥ 6 to hide some)")
+                        reasons.append(f"only {n_edges} edges")
                     if not nx.is_connected(G):
-                        reasons.append("graph is disconnected")
-                    print(f"\n  ⚠ Hide-and-recover validation skipped: {'; '.join(reasons)}")
+                        reasons.append("graph disconnected")
+                    print(f"\n  ⚠ Validation skipped: {'; '.join(reasons)}")
 
         except Exception as e:
             if verbose:
